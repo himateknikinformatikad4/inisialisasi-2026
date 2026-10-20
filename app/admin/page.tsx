@@ -178,7 +178,7 @@ export default function AdminPage() {
       supabase.from("tasks").select("*").order("created_at", { ascending: true }),
       supabase.from("announcements").select("*").order("created_at", { ascending: true }),
       supabase.from("submissions").select("*, users(nama, nim, kelompok)").order("submitted_at", { ascending: false }),
-      supabase.from("users").select("nim, nama, role, total_points, is_graduated, graduation_status, kelompok").neq("role", "admin").order("total_points", { ascending: false }),
+      supabase.from("users").select("nim, nama, role, total_points, is_graduated, graduation_status, kelompok, status_keikutsertaan").neq("role", "admin").order("total_points", { ascending: false }),
     ]);
 
     if (tasksRes.error) throw tasksRes.error;
@@ -253,10 +253,13 @@ export default function AdminPage() {
   }, [selectedSession, currentNim]);
 
   const getGroupAttendancePercentage = (kelompokName: string) => {
-    const members = students.filter((s) => s.kelompok === kelompokName);
-    if (members.length === 0) return 100;
-    const presentCount = members.filter((s) => !!attendanceRecords[s.nim]).length;
-    return (presentCount / members.length) * 100;
+    // Saring hanya anggota aktif (mengabaikan user nonaktif)
+    const activeMembers = students.filter(
+      (s) => s.kelompok === kelompokName && s.status_keikutsertaan !== "nonaktif"
+    );
+    if (activeMembers.length === 0) return 100;
+    const presentCount = activeMembers.filter((s) => !!attendanceRecords[s.nim]).length;
+    return (presentCount / activeMembers.length) * 100;
   };
 
   const under80Groups = listKelompok.filter((kel) => getGroupAttendancePercentage(kel) < 80);
@@ -754,6 +757,35 @@ export default function AdminPage() {
     const targetKelompok = currentSub?.users?.kelompok;
     const isValidated = newPoints > 0;
 
+    // Tentukan status teks untuk update UI & database
+    let updatedStatusText = "Tolak (0)";
+    if (newPoints > 0) {
+      const isRangkuman = (targetTask?.title || "").toLowerCase().includes("rangkuman") || (targetTask?.title || "").toLowerCase().includes("resume");
+      if (isRangkuman) {
+        if (newPoints === 50) updatedStatusText = "Tepat waktu (50)";
+        else if (newPoints === 30) updatedStatusText = "Terlambat (30)";
+        else if (newPoints === 25) updatedStatusText = "Revisi (25)";
+        else if (newPoints === 20) updatedStatusText = "Telat & Revisi (20)";
+        else updatedStatusText = `Poin (${newPoints})`;
+      } else if (taskCat === "kelompok") {
+        if (newPoints === 85) updatedStatusText = "Tepat waktu (85)";
+        else if (newPoints === 70) updatedStatusText = "Terlambat (70)";
+        else if (newPoints === 60) updatedStatusText = "Revisi (60)";
+        else if (newPoints === 35) updatedStatusText = "Telat & Revisi (35)";
+        else updatedStatusText = `Poin (${newPoints})`;
+      } else if (taskCat === "angkatan") {
+        if (newPoints === 70) updatedStatusText = "Tepat waktu (70)";
+        else if (newPoints === 60) updatedStatusText = "Terlambat (60)";
+        else updatedStatusText = `Poin (${newPoints})`;
+      } else {
+        if (newPoints === 100) updatedStatusText = "Tepat waktu (100)";
+        else if (newPoints === 85) updatedStatusText = "Terlambat (85)";
+        else if (newPoints === 70) updatedStatusText = "Revisi (70)";
+        else if (newPoints === 45) updatedStatusText = "Telat & Revisi (45)";
+        else updatedStatusText = `Poin (${newPoints})`;
+      }
+    }
+
     setLoading(true);
     try {
       const { error: submissionError } = await supabase
@@ -761,6 +793,7 @@ export default function AdminPage() {
         .update({
           is_validated: isValidated,
           awarded_points: newPoints,
+          status: updatedStatusText,
         })
         .eq("id", submissionId);
 
@@ -778,7 +811,8 @@ export default function AdminPage() {
           .from("users")
           .select("nim")
           .eq("kelompok", targetKelompok)
-          .neq("role", "admin");
+          .neq("role", "admin")
+          .neq("status_keikutsertaan", "nonaktif");
 
         if (error) throw error;
         recipients = data || [];
@@ -787,7 +821,8 @@ export default function AdminPage() {
         const { data, error } = await supabase
           .from("users")
           .select("nim")
-          .neq("role", "admin");
+          .neq("role", "admin")
+          .neq("status_keikutsertaan", "nonaktif");
 
         if (error) throw error;
         recipients = data || [];
@@ -823,6 +858,16 @@ export default function AdminPage() {
       }
 
       await recalculateManyUsers(recipientNims);
+
+      // PEMBARUAN STATE LOKAL INSTAN
+      setSubmissions((prevSubmissions) =>
+        prevSubmissions.map((sub) =>
+          sub.id === submissionId
+            ? { ...sub, is_validated: isValidated, awarded_points: newPoints, status: updatedStatusText }
+            : sub
+        )
+      );
+
       await loadAllData();
 
       if (taskCat === "kelompok") {
@@ -834,7 +879,7 @@ export default function AdminPage() {
       } else if (taskCat === "angkatan") {
         triggerToast(
           "DISTRIBUSI ANGKATAN",
-          `Nilai ${newPoints} poin dari tugas ini dibagikan ke ${recipientNims.length} mahasiswa maba.`,
+          `Nilai ${newPoints} poin dari tugas ini dibagikan ke ${recipientNims.length} mahasiswa.`,
           false
         );
       } else {
@@ -899,7 +944,10 @@ export default function AdminPage() {
     return matchCat && matchStatus && matchTitle && matchKelompok;
   });
 
-  const filteredStudents = students.filter((stu) => {
+  // Filter Mahasiswa Aktif untuk Presensi (Mengabaikan Mahasiswa Nonaktif)
+  const activeStudents = students.filter((stu) => stu.status_keikutsertaan !== "nonaktif");
+
+  const filteredStudents = activeStudents.filter((stu) => {
     const isPresent = !!attendanceRecords[stu.nim];
     let matchStatus = true;
     if (filterAttendanceStatus === "present") matchStatus = isPresent;
@@ -928,7 +976,7 @@ export default function AdminPage() {
     return matchStatus && matchKelompok && matchAttendanceMode && matchSearch;
   });
 
-  const scopedEvaluationStudents = students.filter((stu) => {
+  const scopedEvaluationStudents = activeStudents.filter((stu) => {
     if (filterEvalKelompok !== "all") {
       return stu.kelompok === filterEvalKelompok;
     }
@@ -947,8 +995,8 @@ export default function AdminPage() {
 
   const countOntime = filteredSubmissions.filter((s) => !s.isLate).length;
   const countLate = filteredSubmissions.filter((s) => s.isLate).length;
-  const countPresent = students.filter((s) => attendanceRecords[s.nim]).length;
-  const countAbsent = students.length - countPresent;
+  const countPresent = activeStudents.filter((s) => attendanceRecords[s.nim]).length;
+  const countAbsent = activeStudents.length - countPresent;
 
   const availableTasks = filterCategory === "all" 
     ? tasks 
@@ -960,982 +1008,907 @@ export default function AdminPage() {
 
   return (
     <>
-      <Navbar />
-      <div 
-        className="dashboard-container" 
-        style={{ 
-          maxWidth: "1360px", 
-          width: "100%", 
-          margin: "0 auto", 
-          padding: "120px 32px 60px 32px", 
-          boxSizing: "border-box",
-          display: "flex",
-          gap: "24px",
-          alignItems: "flex-start"
-        }}
-      >
-        {/* SIDEBAR ADMIN */}
-        <aside 
-          className="task-sidebar" 
-          style={{ 
-            width: "260px",
-            minWidth: "260px",
-            display: "flex", 
-            flexDirection: "column", 
-            position: "sticky", 
-            top: "120px", 
-            height: "calc(100vh - 140px)", 
-            maxHeight: "820px",
-            boxSizing: "border-box",
-            padding: "24px" 
-          }}
-        >
-          <div style={{ flexShrink: 0 }}>
-            <div style={{ marginBottom: "5px" }}>
-              <div style={{ 
-                minHeight: "38px",
-                marginBottom: "10px", 
-                background: "transparent", 
-                border: "1px solid #FF3333", 
-                padding: "6px 12px", 
-                borderRadius: "20px", 
-                display: "inline-flex", 
-                alignItems: "center", 
-                gap: "6px" 
-              }}>
-                <span style={{ fontSize: "11px", color: "#FF3333", fontWeight: 700, textTransform: "uppercase" }}>
-                  {userNama || "ADMIN UTAMA"}
+      {/* ===== DYNAMIC ISLAND TOAST NOTIFICATION ===== */}
+      {toast.show && (
+        <div className="fixed top-6 left-1/2 -translate-x-1/2 z-[999999] flex justify-center pointer-events-none">
+          <div
+            className={`transition-all duration-500 ease-out bg-[#0A0A0C] border-2 ${
+              toast.isError ? "border-rose-600/80 shadow-[0_0_30px_rgba(225,29,72,0.4)]" : "border-[#1B22A7] shadow-[0_0_30px_rgba(27,34,167,0.5)]"
+            } text-[#FAFAFA] px-5 py-3 rounded-full flex items-center gap-3 backdrop-blur-md ${
+              toast.isExpanded ? "scale-100 opacity-100 max-w-xl" : "scale-90 opacity-0 max-w-xs"
+            }`}
+          >
+            <span
+              className={`w-3 h-3 rounded-full animate-ping shrink-0 ${
+                toast.isError ? "bg-rose-500" : "bg-emerald-500"
+              }`}
+            />
+            
+            <div className="flex flex-col text-left">
+              <span className="text-xs font-black tracking-wider uppercase">
+                {toast.message}
+              </span>
+              {toast.subMessage && (
+                <span className="text-[11px] text-zinc-400 font-medium leading-tight">
+                  {toast.subMessage}
                 </span>
-              </div>
-
-              <h2 className="sidebar-header-title">MENU UTAMA</h2>
-            </div>
-
-            <div className="sidebar-menu">
-              <button type="button" className={`sidebar-btn ${activeTab === "rekap" ? "active" : ""}`} onClick={() => setActiveTab("rekap")}>REKAP PENGUMPULAN</button>
-              <button type="button" className={`sidebar-btn ${activeTab === "presensi" ? "active" : ""}`} onClick={() => setActiveTab("presensi")}>INPUT PRESENSI</button>
-              <button type="button" className={`sidebar-btn ${activeTab === "evaluasi" ? "active" : ""}`} onClick={() => setActiveTab("evaluasi")}>EVALUASI AKHIR</button>
-              <button type="button" className={`sidebar-btn ${activeTab === "tugas" ? "active" : ""}`} onClick={() => setActiveTab("tugas")}>TAMBAH TUGAS</button>
-              <button type="button" className={`sidebar-btn ${activeTab === "pengumuman" ? "active" : ""}`} onClick={() => setActiveTab("pengumuman")}>BUAT PENGUMUMAN</button>
-              <button type="button" className={`sidebar-btn ${activeTab === "manage" ? "active" : ""}`} onClick={() => setActiveTab("manage")} style={{ color: "#FF3333" }}>KELOLA ARSIP DATA</button>
-              <a href="/penugasan" className="sidebar-btn" style={{ marginTop: "15px", background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.15)", color: "#FAFAFA", textAlign: "center", textDecoration: "none", display: "block" }}>TAMPILAN MAHASISWA</a>
+              )}
             </div>
           </div>
-        </aside>
+        </div>
+      )}
 
-        {/* MAIN CONTENT AREA */}
-        <main className="task-main-content" style={{ flex: 1, minWidth: 0 }}>
-          {activeTab === "rekap" && (
-            <div className="clickable-task-card" style={{ cursor: "default", padding: "20px", width: "100%", boxSizing: "border-box" }}>
-              <div style={{ display: "flex", flexDirection: "column", gap: "12px", marginBottom: "15px" }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                    <FileSpreadsheet color="#00FF88" size={20} style={{ flexShrink: 0 }} />
-                    <h3 style={{ color: "#FAFAFA", fontSize: "15px", margin: 0, fontWeight: 700 }}>
-                      REKAP PENGUMPULAN
-                    </h3>
-                  </div>
-                  
-                  <div style={{ display: "flex", gap: "6px" }}>
-                    <span style={{ fontSize: "10px", fontWeight: "700", padding: "3px 8px", borderRadius: "50px", background: "transparent", border: "1px solid #00FF88", color: "#00FF88", whiteSpace: "nowrap" }}>
-                      Tepat Waktu: {countOntime}
-                    </span>
-                    <span style={{ fontSize: "10px", fontWeight: "700", padding: "3px 8px", borderRadius: "50px", background: "transparent", border: "1px solid #FF3333", color: "#FF3333", whiteSpace: "nowrap" }}>
-                      Terlambat: {countLate}
-                    </span>
-                  </div>
-                </div>
+      <Navbar />
 
-                <div style={{ display: "flex", alignItems: "center", gap: "8px", width: "100%", flexWrap: "wrap" }}>
-                  <Filter size={14} color="#888" style={{ flexShrink: 0 }} />
-                  
-                  <select 
-                    value={filterCategory} 
-                    onChange={(e: any) => {
-                      setFilterCategory(e.target.value);
-                      setFilterTaskTitle("all");
-                    }} 
-                    style={{ flex: 1, minWidth: "120px", background: "#0a0a0a", border: "1px solid #333", color: "#FAFAFA", padding: "8px 10px", borderRadius: "50px", fontSize: "12px", fontWeight: 600, outline: "none" }}
-                  >
-                    <option value="all">Semua Kategori</option>
-                    <option value="individu">Tugas Individu</option>
-                    <option value="kelompok">Tugas Kelompok</option>
-                    <option value="angkatan">Tugas Angkatan</option>
-                  </select>
+      <div className="dashboard-container" style={{ maxWidth: "1360px", width: "100%", margin: "0 auto", padding: "1.5rem" }}>
+        {/* TAB NAVIGATION */}
+        <div className="flex flex-wrap items-center gap-2 mb-6 border-b border-zinc-800 pb-3">
+          <button
+            onClick={() => setActiveTab("rekap")}
+            className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${
+              activeTab === "rekap" ? "bg-[#1B22A7] text-white shadow-lg shadow-[#1B22A7]/30" : "bg-zinc-900/80 text-zinc-400 hover:text-white"
+            }`}
+          >
+            REKAP PENGUMPULAN
+          </button>
+          <button
+            onClick={() => setActiveTab("presensi")}
+            className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${
+              activeTab === "presensi" ? "bg-[#1B22A7] text-white shadow-lg shadow-[#1B22A7]/30" : "bg-zinc-900/80 text-zinc-400 hover:text-white"
+            }`}
+          >
+            INPUT PRESENSI
+          </button>
+          <button
+            onClick={() => setActiveTab("evaluasi")}
+            className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${
+              activeTab === "evaluasi" ? "bg-[#1B22A7] text-white shadow-lg shadow-[#1B22A7]/30" : "bg-zinc-900/80 text-zinc-400 hover:text-white"
+            }`}
+          >
+            EVALUASI AKHIR
+          </button>
+          <button
+            onClick={() => setActiveTab("tugas")}
+            className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${
+              activeTab === "tugas" ? "bg-[#1B22A7] text-white shadow-lg shadow-[#1B22A7]/30" : "bg-zinc-900/80 text-zinc-400 hover:text-white"
+            }`}
+          >
+            TAMBAH TUGAS
+          </button>
+          <button
+            onClick={() => setActiveTab("pengumuman")}
+            className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${
+              activeTab === "pengumuman" ? "bg-[#1B22A7] text-white shadow-lg shadow-[#1B22A7]/30" : "bg-zinc-900/80 text-zinc-400 hover:text-white"
+            }`}
+          >
+            BUAT PENGUMUMAN
+          </button>
+        </div>
 
-                  <select 
-                    value={filterTaskTitle} 
-                    onChange={(e: any) => setFilterTaskTitle(e.target.value)} 
-                    style={{ flex: 1.2, minWidth: "140px", background: "#0a0a0a", border: "1px solid #333", color: "#FAFAFA", padding: "8px 10px", borderRadius: "50px", fontSize: "12px", fontWeight: 600, outline: "none" }}
-                  >
-                    <option value="all">Semua Judul Tugas</option>
-                    {uniqueTaskTitles.map((title, idx) => (
-                      <option key={idx} value={title}>
-                        {title}
-                      </option>
-                    ))}
-                  </select>
-
-                  <select 
-                    value={filterKelompok} 
-                    onChange={(e: any) => setFilterKelompok(e.target.value)} 
-                    style={{ flex: 1, minWidth: "130px", background: "#0a0a0a", border: "1px solid #333", color: "#FAFAFA", padding: "8px 10px", borderRadius: "50px", fontSize: "12px", fontWeight: 600, outline: "none" }}
-                  >
-                    <option value="all">Semua Kelompok</option>
-                    {listKelompok.map((kel) => (
-                      <option key={kel} value={kel}>{kel}</option>
-                    ))}
-                  </select>
-
-                  <select 
-                    value={filterLateStatus} 
-                    onChange={(e: any) => setFilterLateStatus(e.target.value)} 
-                    style={{ flex: 1, minWidth: "120px", background: "#0a0a0a", border: "1px solid #333", color: "#FAFAFA", padding: "8px 10px", borderRadius: "50px", fontSize: "12px", fontWeight: 600, outline: "none" }}
-                  >
-                    <option value="all">Status ({filteredSubmissions.length})</option>
-                    <option value="ontime">Tepat Waktu</option>
-                    <option value="late">Terlambat</option>
-                  </select>
-                </div>
+        {/* TAB 1: REKAP PENGUMPULAN */}
+        {activeTab === "rekap" && (
+          <div className="bg-[#0A0A0C] border border-zinc-800 rounded-2xl p-6 shadow-2xl">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
+              <div className="flex items-center gap-3">
+                <FileSpreadsheet className="w-5 h-5 text-indigo-400" />
+                <h2 className="text-lg font-black tracking-wide uppercase text-white">REKAP PENGUMPULAN</h2>
               </div>
-
-              <div className="detail-divider" style={{ marginBottom: "15px" }} />
-
-              <div className="desktop-rekap-table" style={{ width: "100%", overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
-                  <thead>
-                    <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.1)", color: "#fafafa", textAlign: "left", fontSize: "11px", textTransform: "uppercase", letterSpacing: "0.5px" }}>
-                      <th style={{ padding: "12px 10px" }}>NIM</th>
-                      <th style={{ padding: "12px 10px" }}>NAMA</th>
-                      <th style={{ padding: "12px 10px" }}>KELOMPOK</th>
-                      <th style={{ padding: "12px 10px" }}>JUDUL TUGAS</th>
-                      <th style={{ padding: "12px 10px" }}>WAKTU PENGUMPULAN</th>
-                      <th style={{ padding: "12px 10px" }}>BERKAS</th>
-                      <th style={{ padding: "12px 10px", textAlign: "right" }}>VALIDASI</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredSubmissions.length === 0 ? (
-                      <tr><td colSpan={7} style={{ padding: "24px", textAlign: "center", color: "#666" }}>Tidak ada data yang sesuai filter.</td></tr>
-                    ) : (
-                      filteredSubmissions.map((sub, i) => {
-                        const options = getTaskPointOptions(sub.category, sub.task_title);
-                        const currentPoints = sub.is_validated ? (sub.awarded_points || 0) : 0;
-                        const rowColor = sub.isLate ? "#FF3333" : "#00FF88";
-
-                        return (
-                          <tr key={i} style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
-                            <td style={{ padding: "12px 10px", fontFamily: "monospace", fontWeight: "bold", color: rowColor, whiteSpace: "nowrap" }}>
-                              {sub.user_nim}
-                            </td>
-                            <td style={{ padding: "12px 10px", fontWeight: 600, color: rowColor, whiteSpace: "nowrap" }}>
-                              {sub.displayNama}
-                            </td>
-                            <td style={{ padding: "12px 10px", fontWeight: 600, color: rowColor, whiteSpace: "nowrap" }}>
-                              {sub.kelompok || "-"}
-                            </td>
-                            <td style={{ padding: "12px 10px", fontWeight: 600, color: rowColor }}>
-                              {sub.task_title}
-                            </td>
-                            <td style={{ padding: "12px 10px", color: rowColor, fontSize: "12px", whiteSpace: "nowrap" }}>
-                              {formatDateTimeWIB(sub.submitted_at)} WIB
-                            </td>
-                            <td style={{ padding: "12px 10px", whiteSpace: "nowrap" }}>
-                              <a 
-                                href={sub.viewUrl} 
-                                target="_blank" 
-                                rel="noreferrer" 
-                                style={{ 
-                                  color: rowColor, 
-                                  display: "inline-flex", 
-                                  alignItems: "center", 
-                                  gap: "4px", 
-                                  textDecoration: "none", 
-                                  fontWeight: 700, 
-                                  fontSize: "12px" 
-                                }}
-                              >
-                                <Eye size={13} style={{ color: rowColor }} /> View
-                              </a>
-                            </td>
-                            <td style={{ padding: "12px 10px", textAlign: "right", whiteSpace: "nowrap" }}>
-                              <select
-                                value={currentPoints}
-                                onChange={(e) => handleTaskPointOptionChange(sub.id, sub.user_nim, Number(e.target.value))}
-                                style={{
-                                  background: "#0a0a0a",
-                                  border: `1px solid ${currentPoints > 0 ? rowColor : "#333"}`,
-                                  color: currentPoints > 0 ? rowColor : "#888",
-                                  padding: "6px 10px",
-                                  borderRadius: "50px",
-                                  fontSize: "11.5px",
-                                  fontWeight: 600,
-                                  outline: "none",
-                                  cursor: "pointer",
-                                  width: "165px"
-                                }}
-                              >
-                                {options.map((opt, idx) => (
-                                  <option key={idx} value={opt.points} style={{ color: opt.points > 0 ? "#00FF88" : "#FF3333" }}>
-                                    {opt.label}
-                                  </option>
-                                ))}
-                              </select>
-                            </td>
-                          </tr>
-                        );
-                      })
-                    )}
-                  </tbody>
-                </table>
+              <div className="flex items-center gap-2">
+                <span className="px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-bold">
+                  Tepat Waktu: {countOntime}
+                </span>
+                <span className="px-3 py-1 rounded-full bg-rose-950/60 border border-rose-500/30 text-rose-400 text-xs font-bold">
+                  Terlambat: {countLate}
+                </span>
               </div>
             </div>
-          )}
 
-          {activeTab === "presensi" && (
-            <div className="clickable-task-card" style={{ cursor: "default", padding: "20px", width: "100%", boxSizing: "border-box" }}>
-              <div style={{ display: "flex", flexDirection: "column", gap: "12px", marginBottom: "15px" }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                    <UserCheck color="#00FF88" size={20} style={{ flexShrink: 0 }} />
-                    <h3 style={{ color: "#FAFAFA", fontSize: "15px", margin: 0, fontWeight: 700 }}>
-                      INPUT PRESENSI
-                    </h3>
-                  </div>
-
-                  <div style={{ display: "flex", gap: "6px" }}>
-                    <span style={{ fontSize: "10px", fontWeight: "700", padding: "3px 8px", borderRadius: "50px", background: "transparent", border: "1px solid #00FF88", color: "#00FF88", whiteSpace: "nowrap" }}>
-                      Hadir: ({countPresent})
-                    </span>
-                    <span style={{ fontSize: "10px", fontWeight: "700", padding: "3px 8px", borderRadius: "50px", background: "transparent", border: "1px solid #FF3333", color: "#FF3333", whiteSpace: "nowrap" }}>
-                      Tidak Hadir: ({countAbsent})
-                    </span>
-                  </div>
-                </div>
-
-                {/* Kolom Cari Nama/NIM Panjang di Atas */}
-                <div style={{ display: "flex", width: "100%", gap: "10px", alignItems: "flex-end" }}>
-                  <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "4px" }}>
-                    <label style={{ fontSize: "11px", color: "#aaa", fontWeight: 600 }}>Cari Nama / NIM Mahasiswa:</label>
-                    <div style={{ position: "relative", display: "flex", alignItems: "center" }}>
-                      <Search size={15} color="#888" style={{ position: "absolute", left: "14px" }} />
-                      <input 
-                        type="text" 
-                        placeholder="Ketik nama lengkap atau NIM mahasiswa..."
-                        value={attendanceSearchQuery}
-                        onChange={(e) => setAttendanceSearchQuery(e.target.value)}
-                        style={{ background: "#0a0a0a", border: "1px solid #333", color: "#fff", padding: "10px 14px 10px 38px", borderRadius: "50px", fontSize: "13px", fontWeight: 600, width: "100%", outline: "none" }}
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                {/* Sesi, Kelompok, Filter Status, Poin, & Tombol Simpan */}
-                <div style={{ display: "flex", alignItems: "flex-end", gap: "10px", width: "100%", flexWrap: "wrap", marginTop: "4px" }}>
-                  <div style={{ flex: 1.5, minWidth: "160px", display: "flex", flexDirection: "column", gap: "4px" }}>
-                    <label style={{ fontSize: "11px", color: "#aaa", fontWeight: 600 }}>Pilih Sesi Kehadiran:</label>
-                    <select 
-                      value={selectedSession} 
-                      onChange={(e) => setSelectedSession(e.target.value)} 
-                      style={{ background: "#0a0a0a", border: "1px solid #333", color: "#FAFAFA", padding: "10px", borderRadius: "50px", fontSize: "13px", fontWeight: 600, outline: "none", width: "100%" }}
-                    >
-                      <option value="pra-inisialisasi">Pra-Inisialisasi</option>
-                      <option value="inisialisasi-day1">Inisialisasi Day 1</option>
-                      <option value="inisialisasi-day2">Inisialisasi Day 2</option>
-                      <option value="inisialisasi-day3">Inisialisasi Day 3</option>
-                      <option value="inisialisasi-day4">Inisialisasi Day 4</option>
-                      <option value="pengukuhan">Pengukuhan</option>
-                    </select>
-                  </div>
-
-                  <div style={{ flex: 1.2, minWidth: "140px", display: "flex", flexDirection: "column", gap: "4px" }}>
-                    <label style={{ fontSize: "11px", color: "#aaa", fontWeight: 600 }}>Filter Kelompok:</label>
-                    <select 
-                      value={filterAttendanceKelompok} 
-                      onChange={(e: any) => setFilterAttendanceKelompok(e.target.value)} 
-                      style={{ background: "#0a0a0a", border: "1px solid #333", color: "#FAFAFA", padding: "10px", borderRadius: "50px", fontSize: "13px", fontWeight: 600, outline: "none", width: "100%" }}
-                    >
-                      <option value="all">Semua Kelompok</option>
-                      {listKelompok.map((kel) => (
-                        <option key={kel} value={kel}>{kel}</option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div style={{ flex: 1.2, minWidth: "140px", display: "flex", flexDirection: "column", gap: "4px" }}>
-                    <label style={{ fontSize: "11px", color: "#aaa", fontWeight: 600 }}>Filter Status:</label>
-                    <select 
-                      value={filterAttendanceStatus} 
-                      onChange={(e: any) => setFilterAttendanceStatus(e.target.value)} 
-                      style={{ background: "#0a0a0a", border: "1px solid #333", color: "#FAFAFA", padding: "10px", borderRadius: "50px", fontSize: "13px", fontWeight: 600, outline: "none", width: "100%" }}
-                    >
-                      <option value="all">Semua ({students.length})</option>
-                      <option value="present">Hadir ({countPresent})</option>
-                      <option value="absent">Tidak Hadir ({countAbsent})</option>
-                    </select>
-                  </div>
-
-                  <div style={{ flex: 1, minWidth: "110px", display: "flex", flexDirection: "column", gap: "4px" }}>
-                    <label style={{ fontSize: "11px", color: "#aaa", fontWeight: 600 }}>Poin Kehadiran:</label>
-                    <input 
-                      type="number" 
-                      placeholder="Default: 375"
-                      value={sessionPoints} 
-                      onChange={(e) => setSessionPoints(e.target.value === "" ? "" : Number(e.target.value))} 
-                      style={{ background: "#0a0a0a", border: "1px solid #333", color: "#fafafa", padding: "10px", borderRadius: "50px", fontSize: "13px", fontWeight: 600, width: "100%" }} 
-                    />
-                  </div>
-
-                  <div style={{ flexShrink: 0 }}>
-                    <button 
-                      type="button"
-                      onClick={handleSaveSessionPoints}
-                      style={{ background: "transparent", border: "1px solid #333", color: "#fafafa", padding: "10px 16px", borderRadius: "50px", fontSize: "13px", fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}
-                    >
-                      Simpan Poin
-                    </button>
-                  </div>
-                </div>
-
-                {/* Baris Filter Persentase Kehadiran Kelompok */}
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "10px", marginTop: "12px", background: "transparent", border: "1px solid #333", padding: "12px 16px", borderRadius: "50px" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
-                    <span style={{ fontSize: "12px", color: "#aaa", fontWeight: 700, marginRight: "4px" }}>Kehadiran Kelompok:</span>
-                    
-                    <button
-                      type="button"
-                      onClick={() => setAttendanceFilterMode(attendanceFilterMode === "under80" ? "all" : "under80")}
-                      style={{
-                        background: attendanceFilterMode === "under80" ? "transparent" : "#0a0a0a",
-                        border: `1px solid ${attendanceFilterMode === "under80" ? "#FF3333" : "#333"}`,
-                        color: attendanceFilterMode === "under80" ? "#FF3333" : "#FAFAFA",
-                        padding: "6px 14px",
-                        borderRadius: "50px",
-                        fontSize: "12px",
-                        fontWeight: 700,
-                        cursor: "pointer",
-                      }}
-                    >
-                      di bawah 80% ({under80Groups.length})
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setAttendanceFilterMode(attendanceFilterMode === "above80" ? "all" : "above80")}
-                      style={{
-                        background: attendanceFilterMode === "above80" ? "transparent" : "#0a0a0a",
-                        border: `1px solid ${attendanceFilterMode === "above80" ? "#00FF88" : "#333"}`,
-                        color: attendanceFilterMode === "above80" ? "#00FF88" : "#FAFAFA",
-                        padding: "6px 14px",
-                        borderRadius: "50px",
-                        fontSize: "12px",
-                        fontWeight: 700,
-                        cursor: "pointer",
-                      }}
-                    >
-                      di atas 80% ({above80Groups.length})
-                    </button>
-                  </div>
-
-                  {attendanceFilterMode !== "all" && (
-                    <button
-                      type="button"
-                      onClick={handleBatchPenalizeFilteredGroups}
-                      disabled={loading}
-                      style={{
-                        background: "transparent",
-                        border: "1px solid #FF3333",
-                        color: "#FF3333",
-                        padding: "6px 14px",
-                        borderRadius: "50px",
-                        fontSize: "12px",
-                        fontWeight: 700,
-                        cursor: "pointer",
-                        display: "inline-flex",
-                        alignItems: "center",
-                        gap: "6px",
-                        whiteSpace: "nowrap"
-                      }}
-                    >
-                      -10 Poin Semua Anggota Kelompok Terpilih
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              <div className="detail-divider" style={{ marginBottom: "15px" }} />
-
-              <div style={{ width: "100%", overflowX: "auto" }}>
-                <table style={{ width: "100%", color: "#FAFAFA", borderCollapse: "collapse", fontSize: "13px" }}>
-                  <thead>
-                    <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.1)", color: "#fafafa", textAlign: "left" }}>
-                      <th style={{ padding: "10px", textAlign: "center" }}>NIM</th>
-                      <th style={{ padding: "10px", textAlign: "center" }}>NAMA MAHASISWA</th>
-                      <th style={{ padding: "10px", textAlign: "center" }}>KELOMPOK</th>
-                      <th style={{ padding: "10px", textAlign: "center" }}>STATUS KEHADIRAN</th>
-                      <th style={{ padding: "10px", textAlign: "center" }}>POIN PRESENSI</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredStudents.length === 0 ? (
-                      <tr><td colSpan={5} style={{ padding: "20px", textAlign: "center", color: "#666" }}>Tidak ada data mahasiswa yang sesuai filter.</td></tr>
-                    ) : (
-                      filteredStudents.map((stu, i) => {
-                        const isPresent = !!attendanceRecords[stu.nim];
-                        const currentPoints = attendancePointsMap[stu.nim] ?? (isPresent ? 375 : 0);
-
-                        return (
-                          <tr key={i} style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
-                            <td style={{ padding: "12px 10px", fontFamily: "monospace", fontWeight: "bold", color: "#00FF88" }}>{stu.nim}</td>
-                            <td style={{ padding: "12px 10px", color: "#FAFAFA", fontWeight: 600 }}>{stu.nama}</td>
-                            <td style={{ padding: "12px 10px", color: "#FAFAFA", fontWeight: 600 }}>{stu.kelompok || "-"}</td>
-                            <td style={{ padding: "12px 10px", textAlign: "center" }}>
-                              <label style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
-                                <input 
-                                  type="checkbox" 
-                                  checked={isPresent} 
-                                  onChange={() => handleAttendanceToggle(stu.nim, isPresent)}
-                                  style={{ width: "18px", height: "18px", accentColor: "#00FF88", cursor: "pointer" }} 
-                                />
-                              </label>
-                            </td>
-                            <td style={{ padding: "12px 10px" }}>
-                              <select
-                                value={currentPoints}
-                                onChange={(e) => handleAttendancePointsChange(stu.nim, Number(e.target.value))}
-                                style={{
-                                  background: "#0a0a0a",
-                                  border: "1px solid #333",
-                                  color: currentPoints > 0 ? "#00FF88" : "#FF3333",
-                                  padding: "6px 12px",
-                                  borderRadius: "8px",
-                                  fontSize: "12px",
-                                  fontWeight: 600,
-                                  outline: "none",
-                                  cursor: "pointer",
-                                  minWidth: "240px"
-                                }}
-                              >
-                                <option value={375} style={{ color: "#00FF88" }}>Hadir tepat waktu (+375 poin)</option>
-                                <option value={365} style={{ color: "#00FF88" }}>Terlambat 5–15 menit (+365 poin)</option>
-                                <option value={355} style={{ color: "#00FF88" }}>Terlambat &gt; 15 menit (+355 poin)</option>
-                                <option value={150} style={{ color: "#00FF88" }}>Sakit dengan izin (+150 poin)</option>
-                                <option value={150} style={{ color: "#00FF88" }}>Izin dengan keterangan (+150 poin)</option>
-                                <option value={0} style={{ color: "#FF3333" }}>Tidak hadir tanpa izin (0 poin)</option>
-                              </select>
-                            </td>
-                          </tr>
-                        );
-                      })
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
-
-          {activeTab === "evaluasi" && (
-            <div className="clickable-task-card" style={{ cursor: "default", padding: "20px", width: "100%", boxSizing: "border-box" }}>
-              <div style={{ display: "flex", flexDirection: "column", gap: "12px", marginBottom: "15px" }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                    <GraduationCap color="#00FF88" size={22} />
-                    <h3 style={{ color: "#FAFAFA", fontSize: "15px", margin: 0, fontWeight: 700 }}>
-                      EVALUASI AKHIR & PENENTUAN KELULUSAN MAHASISWA
-                    </h3>
-                  </div>
-
-                  <div style={{ display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap" }}>
-                    <button 
-                      type="button"
-                      onClick={handleAutoGraduateByThreshold}
-                      disabled={loading}
-                      style={{
-                        background: "transparent",
-                        border: "1px solid #fafafa",
-                        color: "#fafafa",
-                        padding: "3px 8px",
-                        borderRadius: "50px",
-                        fontSize: "10px",
-                        fontWeight: 700,
-                        cursor: "pointer",
-                        display: "inline-flex",
-                        alignItems: "center",
-                        gap: "5px"
-                      }}
-                    >
-                    Tombol Otomatis Luluskan (&ge; {GRADUATION_THRESHOLD})
-                    </button>
-
-                    <span style={{ fontSize: "10px", fontWeight: "700", padding: "3px 8px", borderRadius: "50px", background: "transparent", border: "1px solid #00FF88", color: "#00FF88", whiteSpace: "nowrap" }}>
-                      Memenuhi (&ge; {GRADUATION_THRESHOLD}): ({countCompleteEval})
-                    </span>
-                    <span style={{ fontSize: "10px", fontWeight: "700", padding: "3px 8px", borderRadius: "50px", background: "transparent", border: "1px solid #FF3333", color: "#FF3333", whiteSpace: "nowrap" }}>
-                      Belum Memenuhi (&lt; {GRADUATION_THRESHOLD}): ({countIncompleteEval})
-                    </span>
-                  </div>
-                </div>
-
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "12px", marginTop: "10px" }}>
-                  <p style={{ fontSize: "12.5px", color: "rgba(250,250,250,0.6)", margin: 0, flex: 1, minWidth: "220px" }}>
-                    Syarat minimal kelulusan adalah <strong>{GRADUATION_THRESHOLD} Poin</strong>. Gunakan dropdown filter di samping untuk memilih tampilan data mahasiswa.
-                  </p>
-
-                  <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
-                    <div style={{ width: "170px", display: "flex", flexDirection: "column", gap: "4px" }}>
-                      <label style={{ fontSize: "11px", color: "#aaa", fontWeight: 600 }}>Filter Kelompok:</label>
-                      <select 
-                        value={filterEvalKelompok} 
-                        onChange={(e: any) => setFilterEvalKelompok(e.target.value)} 
-                        style={{ background: "#0a0a0a", border: "1px solid #333", color: "#FAFAFA", padding: "10px", borderRadius: "50px", fontSize: "13px", fontWeight: 600, outline: "none", width: "100%", cursor: "pointer" }}
-                      >
-                        <option value="all">Semua Kelompok</option>
-                        {listKelompok.map((kel) => (
-                          <option key={kel} value={kel}>{kel}</option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <div style={{ width: "230px", display: "flex", flexDirection: "column", gap: "4px" }}>
-                      <label style={{ fontSize: "11px", color: "#aaa", fontWeight: 600 }}>Filter Poin:</label>
-                      <select 
-                        value={filterEvalPoints} 
-                        onChange={(e: any) => setFilterEvalPoints(e.target.value)} 
-                        style={{ background: "#0a0a0a", border: "1px solid #333", color: "#FAFAFA", padding: "10px", borderRadius: "50px", fontSize: "13px", fontWeight: 600, outline: "none", width: "100%", cursor: "pointer" }}
-                      >
-                        <option value="all">Semua Mahasiswa ({scopedEvaluationStudents.length})</option>
-                        <option value="complete">Memenuhi Syarat (&ge; {GRADUATION_THRESHOLD}) - ({countCompleteEval})</option>
-                        <option value="incomplete">Belum Memenuhi (&lt; {GRADUATION_THRESHOLD}) - ({countIncompleteEval})</option>
-                      </select>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="detail-divider" style={{ marginBottom: "15px" }} />
-
-              <div style={{ width: "100%", overflowX: "auto" }}>
-                <table style={{ width: "100%", color: "#FAFAFA", borderCollapse: "collapse", fontSize: "13px" }}>
-                  <thead>
-                    <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.1)", color: "#fafafa", textAlign: "left" }}>
-                      <th style={{ padding: "10px" }}>NIM</th>
-                      <th style={{ padding: "10px" }}>NAMA MAHASISWA</th>
-                      <th style={{ padding: "10px" }}>KELOMPOK</th>
-                      <th style={{ padding: "10px", textAlign: "center" }}>TOTAL POIN</th>
-                      <th style={{ padding: "10px", textAlign: "center" }}>STATUS KELULUSAN</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredEvaluationStudents.length === 0 ? (
-                      <tr><td colSpan={5} style={{ padding: "20px", textAlign: "center", color: "#666" }}>Tidak ada data mahasiswa yang sesuai filter.</td></tr>
-                    ) : (
-                      filteredEvaluationStudents.map((stu, i) => {
-                        const isGraduated = !!stu.is_graduated;
-                        const points = stu.total_points || 0;
-                        const meetsThreshold = points >= GRADUATION_THRESHOLD;
-
-                        return (
-                          <tr key={i} style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
-                            <td style={{ padding: "12px 10px", fontFamily: "monospace", fontWeight: "bold", color: "#00FF88" }}>{stu.nim}</td>
-                            <td style={{ padding: "12px 10px", color: "#FAFAFA", fontWeight: 600 }}>{stu.nama}</td>
-                            <td style={{ padding: "12px 10px", color: "#FAFAFA", fontWeight: 600 }}>{stu.kelompok || "-"}</td>
-                            <td style={{ padding: "12px 10px", textAlign: "center" }}>
-                              <span style={{ fontWeight: "bold", color: meetsThreshold ? "#00FF88" : "#FF3333" }}>
-                                {points} Poin
-                              </span>
-                            </td>
-                            <td style={{ padding: "12px 10px", textAlign: "center" }}>
-                              <label style={{ display: "inline-flex", alignItems: "center", gap: "8px", cursor: "pointer", fontSize: "12px", color: isGraduated ? "#00FF88" : "#FF3333", fontWeight: 700 }}>
-                                <input 
-                                  type="checkbox" 
-                                  checked={isGraduated} 
-                                  onChange={() => handleGraduationToggle(stu.nim, isGraduated)}
-                                  style={{ width: "16px", height: "16px", accentColor: "#00FF88", cursor: "pointer" }} 
-                                />
-                                <span>{isGraduated ? "LULUS & DIKUKUHKAN" : "TIDAK LULUS"}</span>
-                              </label>
-                            </td>
-                          </tr>
-                        );
-                      })
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
-
-          {activeTab === "tugas" && (
-            <div className="clickable-task-card" style={{ cursor: "default", maxWidth: "100%" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "15px" }}>
-                <Plus color="#00FF88" size={20} />
-                <h3 style={{ color: "#FAFAFA", fontSize: "16px", margin: 0 }}>BUAT PENUGASAN BARU</h3>
-              </div>
-              <div className="detail-divider" style={{ marginBottom: "20px" }} />
-              <form onSubmit={handleAddTask} className="auth-form" style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-                <div className="input-group"><label style={{ fontSize: "12px", color: "#aaa" }}>ID Tugas</label><input type="text" placeholder="Contoh: individu-2" value={taskId} onChange={(e) => setTaskId(e.target.value)} required style={{ background: "#0a0a0a", border: "1px solid #333", color: "#fff", padding: "10px", borderRadius: "8px", width: "100%" }} /></div>
-                <div className="input-group"><label style={{ fontSize: "12px", color: "#aaa" }}>Kategori</label><select value={taskCategory} onChange={(e) => setTaskCategory(e.target.value)} style={{ background: "#0a0a0a", border: "1.5px solid #1B22A7", color: "#fff", padding: "10px", borderRadius: "8px", width: "100%" }}><option value="individu">Individu</option><option value="kelompok">Kelompok</option><option value="angkatan">Angkatan</option></select></div>
-                <div className="input-group"><label style={{ fontSize: "12px", color: "#aaa" }}>Judul</label><input type="text" placeholder="Judul..." value={taskTitle} onChange={(e) => setTaskTitle(e.target.value)} required style={{ background: "#0a0a0a", border: "1px solid #333", color: "#fff", padding: "10px", borderRadius: "8px", width: "100%" }} /></div>
-                
-                <div className="input-group">
-                  <label style={{ fontSize: "11px", color: "#aaa" }}>Ketentuan Tugas (Tulis sebagai paragraf / penjelasan bebas)</label>
-                  <textarea rows={6} placeholder="Tulis rincian ketentuan penugasan..." value={taskRules} onChange={(e) => setTaskRules(e.target.value)} required style={{ background: "#0a0a0a", border: "1.5px solid #1B22A7", color: "#fff", padding: "10px", borderRadius: "8px", width: "100%" }} />
-                </div>
-                
-                <div className="input-group">
-                  <label style={{ fontSize: "12px", color: "#aaa" }}>Poin yang akan didapatkan</label>
-                  <input type="number" placeholder="Contoh: 10" value={taskPoints} onChange={(e) => setTaskPoints(e.target.value === "" ? "" : Number(e.target.value))} required style={{ background: "#0a0a0a", border: "1px solid #333", color: "#fff", padding: "10px", borderRadius: "8px", width: "100%" }} />
-                </div>
-
-                <div className="input-group">
-                  <label style={{ fontSize: "12px", color: "#aaa" }}>Deadline</label>
-                  <input 
-                    type="datetime-local" 
-                    step="1"
-                    value={taskDeadline} 
-                    onChange={(e) => setTaskDeadline(e.target.value)} 
-                    required 
-                    style={{ background: "#0a0a0a", border: "1px solid #333", color: "#fff", padding: "10px", borderRadius: "8px", width: "100%" }} 
-                  />
-                </div>
-                <button type="submit" className="btn-auth-submit" disabled={loading} style={{ marginTop: "10px", padding: "12px", background: "#00FF88", color: "#00FF88", fontWeight: 700, border: "none", borderRadius: "8px", cursor: "pointer" }}>{loading ? "MENYIMPAN..." : "TERBITKAN TUGAS"}</button>
-              </form>
-            </div>
-          )}
-
-          {activeTab === "pengumuman" && (
-            <div className="clickable-task-card" style={{ cursor: "default", maxWidth: "100%" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "15px" }}>
-                <Megaphone color="#00FF88" size={20} />
-                <h3 style={{ color: "#FAFAFA", fontSize: "16px", margin: 0 }}>BUAT PENGUMUMAN RESMI</h3>
-              </div>
-              <div className="detail-divider" style={{ marginBottom: "20px" }} />
-              <form onSubmit={handleAddAnnouncement} className="auth-form" style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-                <div className="input-group"><label style={{ fontSize: "12px", color: "#aaa" }}>Judul</label><input type="text" placeholder="Judul..." value={annTitle} onChange={(e) => setAnnTitle(e.target.value)} required style={{ background: "#0a0a0a", border: "1px solid #333", color: "#fff", padding: "10px", borderRadius: "8px", width: "100%" }} /></div>
-                <div className="input-group"><label style={{ fontSize: "11px", color: "#aaa" }}>Isi</label><textarea rows={6} placeholder="Isi..." value={annContent} onChange={(e) => setAnnContent(e.target.value)} required style={{ background: "#0a0a0a", border: "1.5px solid #1B22A7", color: "#fff", padding: "10px", borderRadius: "8px", width: "100%" }} /></div>
-                <button type="submit" className="btn-auth-submit" disabled={loading} style={{ marginTop: "10px", padding: "12px", background: "#00FF88", color: "#00FF88", fontWeight: 700, border: "none", borderRadius: "8px", cursor: "pointer" }}>{loading ? "TERBITKAN..." : "TERBITKAN PENGUMUMAN"}</button>
-              </form>
-            </div>
-          )}
-
-          {activeTab === "manage" && (
-            <div style={{ display: "flex", flexDirection: "column", gap: "25px" }}>
-              <div className="clickable-task-card" style={{ cursor: "default" }}>
-                <h3 style={{ color: "#FAFAFA", fontSize: "15px", marginBottom: "15px", margin: 0 }}>
-                  ⚙️ KELOLA & ARSIP TUGAS
-                </h3>
-                <div style={{ overflowX: "auto", marginTop: "15px" }}>
-                  <table style={{ width: "100%", color: "#FAFAFA", borderCollapse: "collapse", fontSize: "13px" }}>
-                    <thead>
-                      <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.1)", color: "#fafafa", textAlign: "left" }}>
-                        <th style={{ padding: "10px" }}>ID</th>
-                        <th style={{ padding: "10px" }}>KATEGORI</th>
-                        <th style={{ padding: "10px" }}>JUDUL</th>
-                        <th style={{ padding: "10px" }}>POIN</th>
-                        <th style={{ padding: "10px" }}>DEADLINE</th>
-                        <th style={{ padding: "10px" }}>VISIBILITAS</th>
-                        <th style={{ padding: "10px" }}>AKSI</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {tasks.length === 0 ? (
-                        <tr><td colSpan={7} style={{ padding: "15px", color: "#666" }}>Kosong.</td></tr>
-                      ) : (
-                        tasks.map((t) => (
-                          <tr key={t.id} style={{ borderBottom: "1px solid transparent" }}>
-                            <td style={{ padding: "10px", color: "#fafafa", fontFamily: "monospace" }}>{t.id}</td>
-                            <td style={{ padding: "10px" }}>{t.category}</td>
-                            <td style={{ padding: "10px" }}>{t.title}</td>
-                            <td style={{ padding: "10px", color: "#fafafa", fontWeight: "bold" }}>+{t.points || 0}</td>
-                            <td style={{ padding: "10px", color: "#aaa", fontSize: "12px", whiteSpace: "nowrap" }}>
-                              {formatDateTimeWIB(t.deadline)} WIB
-                            </td>
-                            
-                            <td style={{ padding: "10px", whiteSpace: "nowrap" }}>
-                              {t.is_active !== false ? (
-                                <span style={{ background: "transparent", border: "1px solid #00FF88", color: "#00FF88", padding: "4px 10px", borderRadius: "50px", fontSize: "10px", fontWeight: 800, whiteSpace: "nowrap", display: "inline-block" }}>
-                                  DIAKTIFKAN
-                                </span>
-                              ) : (
-                                <span style={{ background: "transparent", border: "1px solid #FF3333", color: "#FF3333", padding: "4px 10px", borderRadius: "50px", fontSize: "10px", fontWeight: 800, whiteSpace: "nowrap", display: "inline-block" }}>
-                                  DISEMBUNYIKAN
-                                </span>
-                              )}
-                            </td>
-
-                            <td style={{ padding: "10px", display: "flex", gap: "8px", whiteSpace: "nowrap" }}>
-                              <button 
-                                onClick={() => { 
-                                  setEditTaskData({ 
-                                    ...t, 
-                                    rules: Array.isArray(t.rules) ? t.rules.join("\n") : (t.rules || ""), 
-                                    deadline: formatISOToInput(t.deadline), 
-                                    points: t.points || 0 
-                                  }); 
-                                  setIsEditTaskModalOpen(true); 
-                                }} 
-                                style={{ background: "transparent", border: "1px solid #fafafa", color: "#FAFAFA", padding: "6px 12px", borderRadius: "50px", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: "5px" }}
-                              >
-                                <Pencil size={13} /> Edit
-                              </button>
-
-                              <button 
-                                onClick={() => handleToggleTaskStatus(t.id, t.is_active !== false)} 
-                                style={{ 
-                                  background: "transparent", 
-                                  border: "1px solid #fafafa", 
-                                  color: "#FAFAFA", 
-                                  padding: "6px 12px", 
-                                  borderRadius: "50px", 
-                                  cursor: "pointer",
-                                  whiteSpace: "nowrap"
-                                }}
-                              >
-                                {t.is_active !== false ? "Sembunyikan" : "Tampilkan"}
-                              </button>
-                            </td>
-                          </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              <div className="clickable-task-card" style={{ cursor: "default" }}>
-                <h3 style={{ color: "#FAFAFA", fontSize: "15px", marginBottom: "15px", margin: 0 }}>
-                  📢 KELOLA & ARSIP PENGUMUMAN
-                </h3>
-                <div style={{ overflowX: "auto", marginTop: "15px" }}>
-                  <table style={{ width: "100%", color: "#FAFAFA", borderCollapse: "collapse", fontSize: "13px" }}>
-                    <thead>
-                      <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.1)", color: "#fafafa", textAlign: "left" }}>
-                        <th style={{ padding: "10px" }}>JUDUL</th>
-                        <th style={{ padding: "10px" }}>TANGGAL</th>
-                        <th style={{ padding: "10px" }}>VISIBILITAS</th>
-                        <th style={{ padding: "10px" }}>AKSI</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {announcements.length === 0 ? (
-                        <tr><td colSpan={4} style={{ padding: "15px", color: "#FAFAFA" }}>Kosong.</td></tr>
-                      ) : (
-                        announcements.map((a) => (
-                          <tr key={a.id} style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
-                            <td style={{ padding: "10px" }}>{a.title}</td>
-                            <td style={{ padding: "10px", color: "#FAFAFA" }}>{new Date(a.created_at).toLocaleDateString("id-ID")}</td>
-                            
-                            <td style={{ padding: "10px", whiteSpace: "nowrap" }}>
-                              {a.is_active !== false ? (
-                                <span style={{ background: "transparent", border: "1px solid #00FF88", color: "#00FF88", padding: "4px 10px", borderRadius: "50px", fontSize: "10px", fontWeight: 800, whiteSpace: "nowrap", display: "inline-block" }}>
-                                  DIAKTFKAN
-                                </span>
-                              ) : (
-                                <span style={{ background: "transparent", border: "1px solid #FF3333", color: "#FF3333", padding: "4px 10px", borderRadius: "50px", fontSize: "10px", fontWeight: 800, whiteSpace: "nowrap", display: "inline-block" }}>
-                                  DISEMBUNYIKAN
-                                </span>
-                              )}
-                            </td>
-
-                            <td style={{ padding: "10px", display: "flex", gap: "8px", whiteSpace: "nowrap" }}>
-                              <button 
-                                onClick={() => { setEditAnnData(a); setIsEditAnnModalOpen(true); }} 
-                                style={{ background: "transparent", border: "1px solid #fafafa", color: "#FAFAFA", padding: "6px 12px", borderRadius: "50px", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: "5px" }}
-                              >
-                                <Pencil size={13} /> Edit
-                              </button>
-
-                              <button 
-                                onClick={() => handleToggleAnnStatus(a.id, a.title, a.is_active !== false)} 
-                                style={{ 
-                                  background: "transparent", 
-                                  border: "1px solid #fafafa", 
-                                  color: "#FAFAFA", 
-                                  padding: "6px 12px", 
-                                  borderRadius: "50px", 
-                                  cursor: "pointer",
-                                  whiteSpace: "nowrap"
-                                }}
-                              >
-                                {a.is_active !== false ? "Sembunyikan" : "Tampilkan"}
-                              </button>
-                            </td>
-                          </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
-          )}
-        </main>
-      </div>
-
-      {/* MODAL EDIT TUGAS */}
-      {isEditTaskModalOpen && editTaskData && (
-        <div className="modal-overlay active" style={{ zIndex: 999999 }}>
-          <div className="modal-card" style={{ maxWidth: "500px", textAlign: "left" }} onClick={(e) => e.stopPropagation()}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "15px", width: "100%" }}>
-              <h3 style={{ color: "#FAFAFA", fontSize: "16px", margin: 0 }}>EDIT TUGAS</h3>
-              <button onClick={() => setIsEditTaskModalOpen(false)} style={{ background: "transparent", border: "none", color: "#aaa", cursor: "pointer" }}><X size={20} /></button>
-            </div>
-            
-            <div style={{ display: "flex", flexDirection: "column", gap: "12px", width: "100%" }}>
-              <div className="input-group">
-                <label style={{ fontSize: "11px", color: "#aaa" }}>Judul</label>
-                <input 
-                  type="text" 
-                  value={editTaskData.title} 
-                  onChange={(e) => setEditTaskData({ ...editTaskData, title: e.target.value })} 
-                  style={{ background: "#0a0a0a", border: "1px solid #333", color: "#fff", padding: "10px", borderRadius: "8px", width: "100%" }} 
-                />
-              </div>
-
-              <div className="input-group">
-                <label style={{ fontSize: "11px", color: "#aaa" }}>Kategori</label>
-                <select 
-                  value={editTaskData.category} 
-                  onChange={(e) => setEditTaskData({ ...editTaskData, category: e.target.value })} 
-                  style={{ background: "#0a0a0a", border: "1px solid #333", color: "#fff", padding: "10px", borderRadius: "8px", width: "100%" }}
+            {/* FILTER CONTROLS */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
+              <div>
+                <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Kategori Tugas</label>
+                <select
+                  value={filterCategory}
+                  onChange={(e) => setFilterCategory(e.target.value as any)}
+                  className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white font-medium focus:outline-none focus:border-[#1B22A7]"
                 >
-                  <option value="individu">Individu</option>
-                  <option value="kelompok">Kelompok</option>
-                  <option value="angkatan">Angkatan</option>
+                  <option value="all">Semua Kategori</option>
+                  <option value="individu">Tugas Individu</option>
+                  <option value="kelompok">Tugas Kelompok</option>
+                  <option value="angkatan">Tugas Angkatan</option>
                 </select>
               </div>
 
-              <div className="input-group">
-                <label style={{ fontSize: "11px", color: "#aaa" }}>Ketentuan Tugas (Paragraf Bebas)</label>
-                <textarea 
-                  rows={5} 
-                  value={editTaskData.rules} 
-                  onChange={(e) => setEditTaskData({ ...editTaskData, rules: e.target.value })} 
-                  style={{ background: "#0a0a0a", border: "1px solid #333", color: "#fff", padding: "10px", borderRadius: "8px", width: "100%" }} 
-                />
+              <div>
+                <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Judul Tugas</label>
+                <select
+                  value={filterTaskTitle}
+                  onChange={(e) => setFilterTaskTitle(e.target.value)}
+                  className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white font-medium focus:outline-none focus:border-[#1B22A7]"
+                >
+                  <option value="all">Semua Judul Tugas</option>
+                  {uniqueTaskTitles.map((title) => (
+                    <option key={title} value={title}>{title}</option>
+                  ))}
+                </select>
               </div>
 
-              <div className="input-group">
-                <label style={{ fontSize: "11px", color: "#aaa" }}>Poin</label>
-                <input 
-                  type="number" 
-                  value={editTaskData.points} 
-                  onChange={(e) => setEditTaskData({ ...editTaskData, points: e.target.value })} 
-                  style={{ background: "#0a0a0a", border: "1px solid #333", color: "#fff", padding: "10px", borderRadius: "8px", width: "100%" }} 
-                />
+              <div>
+                <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Kelompok</label>
+                <select
+                  value={filterKelompok}
+                  onChange={(e) => setFilterKelompok(e.target.value)}
+                  className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white font-medium focus:outline-none focus:border-[#1B22A7]"
+                >
+                  <option value="all">Semua Kelompok</option>
+                  {listKelompok.map((kel) => (
+                    <option key={kel} value={kel}>{kel}</option>
+                  ))}
+                </select>
               </div>
 
-              <div className="input-group">
-                <label style={{ fontSize: "11px", color: "#aaa" }}>Deadline</label>
-                <input 
-                  type="datetime-local" 
-                  step="1"
-                  value={editTaskData.deadline} 
-                  onChange={(e) => setEditTaskData({ ...editTaskData, deadline: e.target.value })} 
-                  style={{ background: "#0a0a0a", border: "1px solid #333", color: "#fff", padding: "10px", borderRadius: "8px", width: "100%" }} 
+              <div>
+                <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Status Pengumpulan</label>
+                <select
+                  value={filterLateStatus}
+                  onChange={(e) => setFilterLateStatus(e.target.value as any)}
+                  className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white font-medium focus:outline-none focus:border-[#1B22A7]"
+                >
+                  <option value="all">Status ({filteredSubmissions.length})</option>
+                  <option value="ontime">Tepat Waktu ({countOntime})</option>
+                  <option value="late">Terlambat ({countLate})</option>
+                </select>
+              </div>
+            </div>
+
+            {/* TABEL REKAP SUBMISSION */}
+            <div className="overflow-x-auto rounded-xl border border-zinc-800">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-zinc-900/80 text-zinc-400 font-bold uppercase tracking-wider border-b border-zinc-800">
+                  <tr>
+                    <th className="p-3">NIM</th>
+                    <th className="p-3">Nama</th>
+                    <th className="p-3">Kelompok</th>
+                    <th className="p-3">Judul Tugas</th>
+                    <th className="p-3">Waktu Pengumpulan</th>
+                    <th className="p-3 text-center">Berkas</th>
+                    <th className="p-3 text-right">Validasi</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-800/60 font-medium">
+                  {filteredSubmissions.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="p-6 text-center text-zinc-500 italic">
+                        Belum ada data pengumpulan tugas yang sesuai filter.
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredSubmissions.map((sub) => {
+                      const options = getTaskPointOptions(sub.category, sub.task_title);
+                      return (
+                        <tr key={sub.id} className="hover:bg-zinc-900/40 transition-colors">
+                          <td className="p-3 font-mono text-emerald-400 font-bold">{sub.nim || sub.users?.nim || "-"}</td>
+                          <td className="p-3 text-white font-bold">{sub.displayNama}</td>
+                          <td className="p-3 text-zinc-300 font-semibold">{sub.kelompok}</td>
+                          <td className="p-3 text-indigo-300 font-bold max-w-xs">{sub.task_title}</td>
+                          <td className="p-3 text-zinc-400">{formatDateTimeWIB(sub.submitted_at)}</td>
+                          <td className="p-3 text-center">
+                            <a
+                              href={sub.viewUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex items-center gap-1 text-indigo-400 hover:text-indigo-300 font-bold underline"
+                            >
+                              <Eye className="w-3.5 h-3.5" /> View
+                            </a>
+                          </td>
+                          <td className="p-3 text-right">
+                            <select
+                              value={sub.awarded_points ?? 0}
+                              onChange={(e) =>
+                                handleTaskPointOptionChange(
+                                  sub.id,
+                                  sub.nim || sub.users?.nim,
+                                  Number(e.target.value)
+                                )
+                              }
+                              className={`px-3 py-1.5 rounded-full border text-xs font-bold bg-zinc-950 focus:outline-none cursor-pointer transition-all ${
+                                (sub.awarded_points ?? 0) > 0
+                                  ? "border-emerald-500/50 text-emerald-400"
+                                  : "border-rose-500/50 text-rose-400"
+                              }`}
+                            >
+                              {options.map((opt) => (
+                                <option key={opt.label} value={opt.points}>
+                                  {opt.label}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* TAB 2: INPUT PRESENSI */}
+        {activeTab === "presensi" && (
+          <div className="bg-[#0A0A0C] border border-zinc-800 rounded-2xl p-6 shadow-2xl">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
+              <div className="flex items-center gap-3">
+                <UserCheck className="w-5 h-5 text-indigo-400" />
+                <h2 className="text-lg font-black tracking-wide uppercase text-white">INPUT PRESENSI</h2>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-bold">
+                  Hadir: {countPresent}
+                </span>
+                <span className="px-3 py-1 rounded-full bg-rose-950/60 border border-rose-500/30 text-rose-400 text-xs font-bold">
+                  Tidak Hadir: {countAbsent}
+                </span>
+              </div>
+            </div>
+
+            {/* PENCARIAN & FILTER PRESENSI */}
+            <div className="mb-4">
+              <div className="relative">
+                <Search className="w-4 h-4 text-zinc-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  placeholder="Ketik nama lengkap atau NIM mahasiswa..."
+                  value={attendanceSearchQuery}
+                  onChange={(e) => setAttendanceSearchQuery(e.target.value)}
+                  className="w-full bg-zinc-900/80 border border-zinc-800 rounded-xl pl-10 pr-4 py-2.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-[#1B22A7]"
                 />
               </div>
+            </div>
 
-              <div style={{ display: "flex", gap: "10px", marginTop: "15px" }}>
-                <button type="button" onClick={handleSaveEditTask} className="btn-modal-primary" disabled={loading} style={{ background: "#00FF88", color: "#000", fontWeight: 700 }}>
-                  {loading ? "MENYIMPAN..." : "SIMPAN PERUBAHAN"}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
+              <div>
+                <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Pilih Sesi Kehadiran</label>
+                <select
+                  value={selectedSession}
+                  onChange={(e) => setSelectedSession(e.target.value)}
+                  className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white font-medium focus:outline-none focus:border-[#1B22A7]"
+                >
+                  <option value="pra-inisialisasi">Pra-Inisialisasi</option>
+                  <option value="hari-1">Hari Ke-1</option>
+                  <option value="hari-2">Hari Ke-2</option>
+                  <option value="hari-3">Hari Ke-3</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Filter Kelompok</label>
+                <select
+                  value={filterAttendanceKelompok}
+                  onChange={(e) => setFilterAttendanceKelompok(e.target.value)}
+                  className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white font-medium focus:outline-none focus:border-[#1B22A7]"
+                >
+                  <option value="all">Semua Kelompok</option>
+                  {listKelompok.map((kel) => (
+                    <option key={kel} value={kel}>{kel}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Filter Status</label>
+                <select
+                  value={filterAttendanceStatus}
+                  onChange={(e) => setFilterAttendanceStatus(e.target.value as any)}
+                  className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white font-medium focus:outline-none focus:border-[#1B22A7]"
+                >
+                  <option value="all">Semua ({activeStudents.length})</option>
+                  <option value="present">Hadir ({countPresent})</option>
+                  <option value="absent">Tidak Hadir ({countAbsent})</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Poin Kehadiran Sesi</label>
+                <div className="flex gap-2">
+                  <input
+                    type="number"
+                    value={sessionPoints}
+                    onChange={(e) => setSessionPoints(e.target.value === "" ? "" : Number(e.target.value))}
+                    placeholder="375"
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white font-bold focus:outline-none focus:border-[#1B22A7]"
+                  />
+                  <button
+                    onClick={handleSaveSessionPoints}
+                    className="px-4 py-2 bg-[#1B22A7] hover:bg-[#151a82] text-white font-bold text-xs rounded-xl transition-all shrink-0"
+                  >
+                    Simpan
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* BADGES FILTER KELOMPOK KEHADIRAN */}
+            <div className="flex flex-wrap items-center gap-3 mb-6 p-4 bg-zinc-900/40 rounded-xl border border-zinc-800/80">
+              <span className="text-xs font-bold text-zinc-400 uppercase tracking-wider">Kehadiran Kelompok:</span>
+              <button
+                onClick={() => setAttendanceFilterMode("under80")}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all border ${
+                  attendanceFilterMode === "under80"
+                    ? "bg-rose-950/80 border-rose-500 text-rose-400"
+                    : "bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white"
+                }`}
+              >
+                di bawah 80% ({under80Groups.length})
+              </button>
+              <button
+                onClick={() => setAttendanceFilterMode("above80")}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all border ${
+                  attendanceFilterMode === "above80"
+                    ? "bg-emerald-950/80 border-emerald-500 text-emerald-400"
+                    : "bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white"
+                }`}
+              >
+                di atas 80% ({above80Groups.length})
+              </button>
+              {attendanceFilterMode !== "all" && (
+                <button
+                  onClick={() => setAttendanceFilterMode("all")}
+                  className="text-xs font-bold text-indigo-400 hover:underline ml-2"
+                >
+                  Reset Filter
                 </button>
-                <button type="button" onClick={() => setIsEditTaskModalOpen(false)} className="btn-modal-close">BATAL</button>
-              </div>
+              )}
+
+              <button
+                onClick={handleBatchPenalizeFilteredGroups}
+                disabled={loading}
+                className="ml-auto px-4 py-1.5 bg-rose-600/90 hover:bg-rose-600 text-white font-bold text-xs rounded-xl shadow-lg shadow-rose-600/20 transition-all disabled:opacity-50"
+              >
+                Terapkan Penalti -10 Poin (di bawah80%)
+              </button>
+            </div>
+
+            {/* TABEL PRESENSI MAHASISWA */}
+            <div className="overflow-x-auto rounded-xl border border-zinc-800">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-zinc-900/80 text-zinc-400 font-bold uppercase tracking-wider border-b border-zinc-800">
+                  <tr>
+                    <th className="p-3">NIM</th>
+                    <th className="p-3">Nama</th>
+                    <th className="p-3">Kelompok</th>
+                    <th className="p-3 text-center">Status Kehadiran</th>
+                    <th className="p-3 text-right">Poin Presensi</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-800/60 font-medium">
+                  {filteredStudents.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="p-6 text-center text-zinc-500 italic">
+                        Tidak ada data mahasiswa aktif yang sesuai.
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredStudents.map((stu) => {
+                      const isPresent = !!attendanceRecords[stu.nim];
+                      const pts = attendancePointsMap[stu.nim] ?? (isPresent ? Number(sessionPoints) || 375 : 0);
+
+                      return (
+                        <tr key={stu.nim} className="hover:bg-zinc-900/40 transition-colors">
+                          <td className="p-3 font-mono text-emerald-400 font-bold">{stu.nim}</td>
+                          <td className="p-3 text-white font-bold">{stu.nama}</td>
+                          <td className="p-3 text-zinc-300 font-semibold">{stu.kelompok}</td>
+                          <td className="p-3 text-center">
+                            <button
+                              onClick={() => handleAttendanceToggle(stu.nim, isPresent)}
+                              className={`px-4 py-1 rounded-full text-xs font-bold transition-all ${
+                                isPresent
+                                  ? "bg-emerald-950/80 border border-emerald-500/50 text-emerald-400"
+                                  : "bg-rose-950/80 border border-rose-500/50 text-rose-400"
+                              }`}
+                            >
+                              {isPresent ? "Hadir" : "Tidak Hadir"}
+                            </button>
+                          </td>
+                          <td className="p-3 text-right">
+                            <input
+                              type="number"
+                              value={pts}
+                              onChange={(e) => handleAttendancePointsChange(stu.nim, Number(e.target.value))}
+                              className="w-24 bg-zinc-950 border border-zinc-800 rounded-lg px-2.5 py-1 text-right text-xs font-bold text-white focus:outline-none focus:border-[#1B22A7]"
+                            />
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
             </div>
           </div>
-        </div>
-      )}
+        )}
 
-      {/* MODAL EDIT PENGUMUMAN */}
-      {isEditAnnModalOpen && editAnnData && (
-        <div className="modal-overlay active" style={{ zIndex: 999999 }}>
-          <div className="modal-card" style={{ maxWidth: "500px", textAlign: "left" }} onClick={(e) => e.stopPropagation()}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "15px", width: "100%" }}>
-              <h3 style={{ color: "#FAFAFA", fontSize: "16px", margin: 0 }}>EDIT PENGUMUMAN</h3>
-              <button onClick={() => setIsEditAnnModalOpen(false)} style={{ background: "transparent", border: "none", color: "#aaa", cursor: "pointer" }}><X size={20} /></button>
+        {/* TAB 3: EVALUASI AKHIR */}
+        {activeTab === "evaluasi" && (
+          <div className="bg-[#0A0A0C] border border-zinc-800 rounded-2xl p-6 shadow-2xl">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
+              <div className="flex items-center gap-3">
+                <GraduationCap className="w-5 h-5 text-indigo-400" />
+                <h2 className="text-lg font-black tracking-wide uppercase text-white">EVALUASI KELULUSAN MAHASISWA</h2>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-bold">
+                  Lulus: {countCompleteEval}
+                </span>
+                <span className="px-3 py-1 rounded-full bg-rose-950/60 border border-rose-500/30 text-rose-400 text-xs font-bold">
+                  Belum Memenuhi: {countIncompleteEval}
+                </span>
+              </div>
             </div>
-            
-            <div style={{ display: "flex", flexDirection: "column", gap: "12px", width: "100%" }}>
-              <div className="input-group">
-                <label style={{ fontSize: "11px", color: "#aaa" }}>Judul</label>
-                <input 
-                  type="text" 
-                  value={editAnnData.title} 
-                  onChange={(e) => setEditAnnData({ ...editAnnData, title: e.target.value })} 
-                  style={{ background: "#0a0a0a", border: "1px solid #333", color: "#fff", padding: "10px", borderRadius: "8px", width: "100%" }} 
-                />
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
+              <div>
+                <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Filter Kelompok</label>
+                <select
+                  value={filterEvalKelompok}
+                  onChange={(e) => setFilterEvalKelompok(e.target.value)}
+                  className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white font-medium focus:outline-none focus:border-[#1B22A7]"
+                >
+                  <option value="all">Semua Kelompok</option>
+                  {listKelompok.map((kel) => (
+                    <option key={kel} value={kel}>{kel}</option>
+                  ))}
+                </select>
               </div>
 
-              <div className="input-group">
-                <label style={{ fontSize: "11px", color: "#aaa" }}>Isi</label>
-                <textarea 
-                  rows={5} 
-                  value={editAnnData.content} 
-                  onChange={(e) => setEditAnnData({ ...editAnnData, content: e.target.value })} 
-                  style={{ background: "#0a0a0a", border: "1px solid #333", color: "#fff", padding: "10px", borderRadius: "8px", width: "100%" }} 
-                />
+              <div>
+                <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Status Poin (Threshold: {GRADUATION_THRESHOLD})</label>
+                <select
+                  value={filterEvalPoints}
+                  onChange={(e) => setFilterEvalPoints(e.target.value as any)}
+                  className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white font-medium focus:outline-none focus:border-[#1B22A7]"
+                >
+                  <option value="all">Semua Mahasiswa ({scopedEvaluationStudents.length})</option>
+                  <option value="complete">Poin Memenuhi ({countCompleteEval})</option>
+                  <option value="incomplete">Poin Belum Memenuhi ({countIncompleteEval})</option>
+                </select>
               </div>
 
-              <div style={{ display: "flex", gap: "10px", marginTop: "15px" }}>
-                <button type="button" onClick={handleSaveEditAnn} className="btn-modal-primary" disabled={loading} style={{ background: "#00FF88", color: "#00FF88", fontWeight: 700 }}>
-                  {loading ? "MENYIMPAN..." : "SIMPAN PERUBAHAN"}
+              <div className="flex items-end">
+                <button
+                  onClick={handleAutoGraduateByThreshold}
+                  disabled={loading}
+                  className="w-full py-2 bg-[#1B22A7] hover:bg-[#151a82] text-white font-bold text-xs rounded-xl shadow-lg shadow-[#1B22A7]/20 transition-all disabled:opacity-50"
+                >
+                  Luluskan Otomatis (&gt;= {GRADUATION_THRESHOLD} Poin)
                 </button>
-                <button type="button" onClick={() => setIsEditAnnModalOpen(false)} className="btn-modal-close">BATAL</button>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto rounded-xl border border-zinc-800">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-zinc-900/80 text-zinc-400 font-bold uppercase tracking-wider border-b border-zinc-800">
+                  <tr>
+                    <th className="p-3">NIM</th>
+                    <th className="p-3">Nama</th>
+                    <th className="p-3">Kelompok</th>
+                    <th className="p-3 text-right">Total Akumulasi Poin</th>
+                    <th className="p-3 text-center">Status Kelulusan</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-800/60 font-medium">
+                  {filteredEvaluationStudents.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="p-6 text-center text-zinc-500 italic">
+                        Tidak ada data mahasiswa yang sesuai kriteria evaluasi.
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredEvaluationStudents.map((stu) => {
+                      const totalP = stu.total_points || 0;
+                      const isGrad = !!stu.is_graduated;
+
+                      return (
+                        <tr key={stu.nim} className="hover:bg-zinc-900/40 transition-colors">
+                          <td className="p-3 font-mono text-emerald-400 font-bold">{stu.nim}</td>
+                          <td className="p-3 text-white font-bold">{stu.nama}</td>
+                          <td className="p-3 text-zinc-300 font-semibold">{stu.kelompok}</td>
+                          <td className="p-3 text-right font-mono font-bold text-indigo-300">{totalP} Poin</td>
+                          <td className="p-3 text-center">
+                            <button
+                              onClick={() => handleGraduationToggle(stu.nim, isGrad)}
+                              className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all border ${
+                                isGrad
+                                  ? "bg-emerald-950/80 border-emerald-500/50 text-emerald-400"
+                                  : "bg-rose-950/80 border-rose-500/50 text-rose-400"
+                              }`}
+                            >
+                              {isGrad ? "LULUS & DIKUKUHKAN" : "TIDAK LULUS"}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* TAB 4: TAMBAH TUGAS */}
+        {activeTab === "tugas" && (
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div className="bg-[#0A0A0C] border border-zinc-800 rounded-2xl p-6 shadow-2xl h-fit">
+              <div className="flex items-center gap-3 mb-6">
+                <Plus className="w-5 h-5 text-indigo-400" />
+                <h2 className="text-lg font-black tracking-wide uppercase text-white">BUAT TUGAS BARU</h2>
+              </div>
+
+              <form onSubmit={handleAddTask} className="space-y-4">
+                <div>
+                  <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">ID Tugas (Unique Code)</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="misal: TGS-IND-01"
+                    value={taskId}
+                    onChange={(e) => setTaskId(e.target.value)}
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white font-medium focus:outline-none focus:border-[#1B22A7]"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Kategori Tugas</label>
+                  <select
+                    value={taskCategory}
+                    onChange={(e) => setTaskCategory(e.target.value)}
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white font-medium focus:outline-none focus:border-[#1B22A7]"
+                  >
+                    <option value="individu">Individu</option>
+                    <option value="kelompok">Kelompok</option>
+                    <option value="angkatan">Angkatan</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Judul Tugas</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Judul lengkap penugasan..."
+                    value={taskTitle}
+                    onChange={(e) => setTaskTitle(e.target.value)}
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white font-medium focus:outline-none focus:border-[#1B22A7]"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Aturan & Petunjuk (Pisahkan dengan baris baru)</label>
+                  <textarea
+                    rows={4}
+                    placeholder="1. Buat file format PDF..."
+                    value={taskRules}
+                    onChange={(e) => setTaskRules(e.target.value)}
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white font-medium focus:outline-none focus:border-[#1B22A7]"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Tenggat Waktu (Deadline)</label>
+                  <input
+                    type="datetime-local"
+                    required
+                    value={taskDeadline}
+                    onChange={(e) => setTaskDeadline(e.target.value)}
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white font-medium focus:outline-none focus:border-[#1B22A7]"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Poin Maksimal</label>
+                  <input
+                    type="number"
+                    required
+                    placeholder="100"
+                    value={taskPoints}
+                    onChange={(e) => setTaskPoints(e.target.value === "" ? "" : Number(e.target.value))}
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white font-medium focus:outline-none focus:border-[#1B22A7]"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full py-2.5 bg-[#1B22A7] hover:bg-[#151a82] text-white font-bold text-xs rounded-xl shadow-lg shadow-[#1B22A7]/20 transition-all disabled:opacity-50"
+                >
+                  Terbitkan Penugasan
+                </button>
+              </form>
+            </div>
+
+            {/* DAFTAR TUGAS KONTROL */}
+            <div className="lg:col-span-2 bg-[#0A0A0C] border border-zinc-800 rounded-2xl p-6 shadow-2xl">
+              <h2 className="text-lg font-black tracking-wide uppercase text-white mb-6">DAFTAR PENUGASAN AKTIF</h2>
+              <div className="space-y-3">
+                {tasks.map((t) => (
+                  <div key={t.id} className="p-4 bg-zinc-900/40 border border-zinc-800 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div>
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-950 text-indigo-400 uppercase">{t.category}</span>
+                        <span className="font-mono text-xs text-emerald-400 font-bold">{t.id}</span>
+                      </div>
+                      <h3 className="text-sm font-bold text-white">{t.title}</h3>
+                      <p className="text-[11px] text-zinc-400 mt-0.5">Deadline: {formatDateTimeWIB(t.deadline)} | Poin: {t.points}</p>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => {
+                          setEditTaskData({
+                            ...t,
+                            deadline: formatISOToInput(t.deadline)
+                          });
+                          setIsEditTaskModalOpen(true);
+                        }}
+                        className="p-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg transition-colors"
+                      >
+                        <Pencil className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        onClick={() => handleToggleTaskStatus(t.id, !!t.is_active)}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                          t.is_active ? "bg-emerald-950 border border-emerald-500/50 text-emerald-400" : "bg-rose-950 border border-rose-500/50 text-rose-400"
+                        }`}
+                      >
+                        {t.is_active ? "Aktif" : "Nonaktif"}
+                      </button>
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
           </div>
-        </div>
-      )}
+        )}
 
-      {/* MODAL KONFIRMASI */}
-      {confirmModal.isOpen && (
-        <div className="modal-overlay active" style={{ zIndex: 9999999 }}>
-          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <AlertCircle className="modal-icon" style={{ color: "#FFAA00" }} />
-              <h2>{confirmModal.title}</h2>
+        {/* TAB 5: BUAT PENGUMUMAN */}
+        {activeTab === "pengumuman" && (
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div className="bg-[#0A0A0C] border border-zinc-800 rounded-2xl p-6 shadow-2xl h-fit">
+              <div className="flex items-center gap-3 mb-6">
+                <Megaphone className="w-5 h-5 text-indigo-400" />
+                <h2 className="text-lg font-black tracking-wide uppercase text-white">PENGUMUMAN BARU</h2>
+              </div>
+
+              <form onSubmit={handleAddAnnouncement} className="space-y-4">
+                <div>
+                  <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Judul Pengumuman</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Judul resmi pengumuman..."
+                    value={annTitle}
+                    onChange={(e) => setAnnTitle(e.target.value)}
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white font-medium focus:outline-none focus:border-[#1B22A7]"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Isi Pesan Pengumuman</label>
+                  <textarea
+                    rows={6}
+                    required
+                    placeholder="Sampaikan instruksi atau informasi resmi..."
+                    value={annContent}
+                    onChange={(e) => setAnnContent(e.target.value)}
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white font-medium focus:outline-none focus:border-[#1B22A7]"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full py-2.5 bg-[#1B22A7] hover:bg-[#151a82] text-white font-bold text-xs rounded-xl shadow-lg shadow-[#1B22A7]/20 transition-all disabled:opacity-50"
+                >
+                  Publikasikan Pengumuman
+                </button>
+              </form>
             </div>
-            <p className="modal-desc" style={{ marginBottom: "20px" }}>{confirmModal.description}</p>
-            <div className="modal-buttons">
-              <button type="button" className="btn-modal-primary" onClick={confirmModal.onConfirm} style={{ background: "#FFAA00", color: "#000" }}>YA, LANJUTKAN</button>
-              <button type="button" className="btn-modal-close" onClick={() => setConfirmModal((prev) => ({ ...prev, isOpen: false }))}>BATAL</button>
+
+            <div className="lg:col-span-2 bg-[#0A0A0C] border border-zinc-800 rounded-2xl p-6 shadow-2xl">
+              <h2 className="text-lg font-black tracking-wide uppercase text-white mb-6">PENGUMUMAN DITERBITKAN</h2>
+              <div className="space-y-3">
+                {announcements.map((ann) => (
+                  <div key={ann.id} className="p-4 bg-zinc-900/40 border border-zinc-800 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div>
+                      <h3 className="text-sm font-bold text-white">{ann.title}</h3>
+                      <p className="text-xs text-zinc-400 mt-1 line-clamp-2">{ann.content}</p>
+                      <p className="text-[10px] text-zinc-500 mt-2">Dibuat: {formatDateTimeWIB(ann.created_at)}</p>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => {
+                          setEditAnnData(ann);
+                          setIsEditAnnModalOpen(true);
+                        }}
+                        className="p-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg transition-colors"
+                      >
+                        <Pencil className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        onClick={() => handleToggleAnnStatus(ann.id, ann.title, !!ann.is_active)}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                          ann.is_active ? "bg-emerald-950 border border-emerald-500/50 text-emerald-400" : "bg-rose-950 border border-rose-500/50 text-rose-400"
+                        }`}
+                      >
+                        {ann.is_active ? "Aktif" : "Nonaktif"}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        )}
 
-      {/* DYNAMIC ISLAND NOTIFICATION TOAST */}
-      <div style={{ position: "fixed", top: "110px", left: "50%", transform: "translateX(-50%)", zIndex: 99999999, pointerEvents: "none", display: "flex", justifyContent: "center", alignItems: "center" }}>
-        <div style={{
-          background: "#0a0a0e",
-          border: toast.isError ? "1.5px solid rgba(255, 51, 51, 0.9)" : "1.5px solid rgba(0, 255, 136, 0.9)",
-          borderRadius: "50px",
-          height: "48px",
-          minWidth: toast.isExpanded ? "340px" : "48px",
-          maxWidth: toast.isExpanded ? "480px" : "48px",
-          padding: toast.isExpanded ? "0 18px 0 8px" : "0",
-          boxShadow: toast.isError ? "0 15px 35px rgba(255, 51, 51, 0.35)" : "0 15px 35px rgba(0, 255, 136, 0.35)",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: toast.isExpanded ? "flex-start" : "center",
-          backdropFilter: "blur(20px)",
-          boxSizing: "border-box",
-          overflow: "hidden",
-          transition: "all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1)",
-          opacity: toast.show ? 1 : 0,
-          transform: toast.show ? "scale(1)" : "scale(0.1)"
-        }}>
-          <div style={{ width: "32px", height: "32px", borderRadius: "50%", background: toast.isError ? "rgba(255, 51, 51, 0.2)" : "rgba(0, 255, 136, 0.2)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-            {toast.isError ? <AlertCircle style={{ width: "18px", height: "18px", color: "#FF3333" }} /> : <CheckCircle2 style={{ width: "18px", height: "18px", color: "#00FF88" }} />}
-          </div>
-          {toast.isExpanded && (
-            <div style={{ display: "flex", flexDirection: "column", textAlign: "left", paddingLeft: "10px", whiteSpace: "nowrap", overflow: "hidden" }}>
-              <h4 style={{ margin: 0, fontSize: "12px", fontWeight: 800, color: toast.isError ? "#FF3333" : "#00FF88", textTransform: "uppercase" }}>{toast.message}</h4>
-              <p style={{ margin: "2px 0 0 0", fontSize: "11.5px", color: "rgba(250, 250, 250, 0.9)" }}>{toast.subMessage}</p>
+        {/* MODAL EDIT PENGUMUMAN */}
+        {isEditAnnModalOpen && editAnnData && (
+          <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+            <div className="bg-[#0A0A0C] border border-zinc-800 rounded-2xl max-w-md w-full p-6 relative shadow-2xl">
+              <button
+                onClick={() => setIsEditAnnModalOpen(false)}
+                className="absolute top-4 right-4 text-zinc-400 hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+
+              <h3 className="text-base font-black text-white uppercase mb-4">EDIT PENGUMUMAN</h3>
+
+              <div className="space-y-4">
+                <div>
+                  <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Judul Pengumuman</label>
+                  <input
+                    type="text"
+                    value={editAnnData.title}
+                    onChange={(e) => setEditAnnData({ ...editAnnData, title: e.target.value })}
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white font-medium focus:outline-none focus:border-[#1B22A7]"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Isi Pengumuman</label>
+                  <textarea
+                    rows={5}
+                    value={editAnnData.content}
+                    onChange={(e) => setEditAnnData({ ...editAnnData, content: e.target.value })}
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white font-medium focus:outline-none focus:border-[#1B22A7]"
+                  />
+                </div>
+
+                <div className="flex justify-end gap-2 pt-2">
+                  <button
+                    onClick={() => setIsEditAnnModalOpen(false)}
+                    className="px-4 py-2 bg-zinc-800 text-zinc-300 font-bold text-xs rounded-xl hover:bg-zinc-700"
+                  >
+                    Batal
+                  </button>
+                  <button
+                    onClick={handleSaveEditAnn}
+                    disabled={loading}
+                    className="px-4 py-2 bg-[#1B22A7] text-white font-bold text-xs rounded-xl hover:bg-[#151a82]"
+                  >
+                    Simpan Perubahan
+                  </button>
+                </div>
+              </div>
             </div>
-          )}
-        </div>
+          </div>
+        )}
+
+        {/* MODAL EDIT TUGAS */}
+        {isEditTaskModalOpen && editTaskData && (
+          <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+            <div className="bg-[#0A0A0C] border border-zinc-800 rounded-2xl max-w-lg w-full p-6 relative shadow-2xl">
+              <button
+                onClick={() => setIsEditTaskModalOpen(false)}
+                className="absolute top-4 right-4 text-zinc-400 hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+
+              <h3 className="text-base font-black text-white uppercase mb-4">EDIT TUGAS ({editTaskData.id})</h3>
+
+              <div className="space-y-4">
+                <div>
+                  <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Judul Tugas</label>
+                  <input
+                    type="text"
+                    value={editTaskData.title}
+                    onChange={(e) => setEditTaskData({ ...editTaskData, title: e.target.value })}
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white font-medium focus:outline-none focus:border-[#1B22A7]"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Kategori</label>
+                  <select
+                    value={editTaskData.category}
+                    onChange={(e) => setEditTaskData({ ...editTaskData, category: e.target.value })}
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white font-medium focus:outline-none focus:border-[#1B22A7]"
+                  >
+                    <option value="individu">Individu</option>
+                    <option value="kelompok">Kelompok</option>
+                    <option value="angkatan">Angkatan</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Deadline</label>
+                  <input
+                    type="datetime-local"
+                    value={editTaskData.deadline || ""}
+                    onChange={(e) => setEditTaskData({ ...editTaskData, deadline: e.target.value })}
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white font-medium focus:outline-none focus:border-[#1B22A7]"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">Poin Maksimal</label>
+                  <input
+                    type="number"
+                    value={editTaskData.points}
+                    onChange={(e) => setEditTaskData({ ...editTaskData, points: Number(e.target.value) })}
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white font-medium focus:outline-none focus:border-[#1B22A7]"
+                  />
+                </div>
+
+                <div className="flex justify-end gap-2 pt-2">
+                  <button
+                    onClick={() => setIsEditTaskModalOpen(false)}
+                    className="px-4 py-2 bg-zinc-800 text-zinc-300 font-bold text-xs rounded-xl hover:bg-zinc-700"
+                  >
+                    Batal
+                  </button>
+                  <button
+                    onClick={handleSaveEditTask}
+                    disabled={loading}
+                    className="px-4 py-2 bg-[#1B22A7] text-white font-bold text-xs rounded-xl hover:bg-[#151a82]"
+                  >
+                    Simpan Perubahan
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* MODAL KONFIRMASI STATUS */}
+        {confirmModal.isOpen && (
+          <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+            <div className="bg-[#0A0A0C] border border-zinc-800 rounded-2xl max-w-sm w-full p-6 text-center relative shadow-2xl">
+              <AlertCircle className="w-10 h-10 text-amber-500 mx-auto mb-3" />
+              <h3 className="text-sm font-black text-white uppercase mb-2">{confirmModal.title}</h3>
+              <p className="text-xs text-zinc-400 mb-6">{confirmModal.description}</p>
+
+              <div className="flex justify-center gap-2">
+                <button
+                  onClick={() => setConfirmModal((prev) => ({ ...prev, isOpen: false }))}
+                  className="px-4 py-2 bg-zinc-800 text-zinc-300 font-bold text-xs rounded-xl hover:bg-zinc-700"
+                >
+                  Batal
+                </button>
+                <button
+                  onClick={confirmModal.onConfirm}
+                  className="px-4 py-2 bg-[#1B22A7] text-white font-bold text-xs rounded-xl hover:bg-[#151a82]"
+                >
+                  Ya, Lanjutkan
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </>
   );
