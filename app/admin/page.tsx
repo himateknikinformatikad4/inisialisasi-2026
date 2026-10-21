@@ -786,7 +786,15 @@ export default function AdminPage() {
       }
     }
 
-    setLoading(true);
+    // 1. UPDATE STATE LOKAL SECARA INSTAN TERLEBIH DAHULU (Mencegah Freeze & Memastikan UI Responsif)
+    setSubmissions((prevSubmissions) =>
+      prevSubmissions.map((sub) =>
+        sub.id === submissionId
+          ? { ...sub, is_validated: isValidated, awarded_points: newPoints, status: updatedStatusText }
+          : sub
+      )
+    );
+
     try {
       const { error: submissionError } = await supabase
         .from("submissions")
@@ -857,19 +865,10 @@ export default function AdminPage() {
         if (awardError) throw awardError;
       }
 
-      await recalculateManyUsers(recipientNims);
+      // Hitung ulang total poin user di background tanpa memblokir render
+      recalculateManyUsers(recipientNims);
 
-      // PEMBARUAN STATE LOKAL INSTAN
-      setSubmissions((prevSubmissions) =>
-        prevSubmissions.map((sub) =>
-          sub.id === submissionId
-            ? { ...sub, is_validated: isValidated, awarded_points: newPoints, status: updatedStatusText }
-            : sub
-        )
-      );
-
-      await loadAllData();
-
+      // Memicu Dynamic Island Toast dengan mulus
       if (taskCat === "kelompok") {
         triggerToast(
           "DISTRIBUSI KELOMPOK",
@@ -887,8 +886,8 @@ export default function AdminPage() {
       }
     } catch (err: any) {
       triggerToast("GAGAL DISTRIBUSI NILAI", err.message || "Terjadi kesalahan saat mendistribusikan nilai.", true);
-    } finally {
-      setLoading(false);
+      // Rollback state jika gagal ke database (opsional)
+      loadAllData();
     }
   };
 
@@ -1366,7 +1365,7 @@ export default function AdminPage() {
                 disabled={loading}
                 className="ml-auto px-4 py-1.5 bg-rose-600/90 hover:bg-rose-600 text-white font-bold text-xs rounded-xl shadow-lg shadow-rose-600/20 transition-all disabled:opacity-50"
               >
-                Terapkan Penalti -10 Poin (di bawah80%)
+                Terapkan Penalti -10 Poin (di bawah 80%)
               </button>
             </div>
 
