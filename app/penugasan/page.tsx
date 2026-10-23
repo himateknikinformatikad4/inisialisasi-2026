@@ -24,6 +24,16 @@ import {
   Link2
 } from "lucide-react";
 
+// Bentuk satu baris riwayat poin (gabungan tugas + presensi)
+type PointHistoryItem = {
+  key: string;
+  jenis: string;
+  nama: string;
+  poin: number;
+  waktu: string | null;
+  isPresensi: boolean;
+};
+
 export default function PenugasanPage() {
   const router = useRouter();
   const [activeTab, setActiveTab] = useState("pengumuman");
@@ -56,6 +66,10 @@ export default function PenugasanPage() {
   const [dbAnnouncements, setDbAnnouncements] = useState<any[]>([]);
   const [dbTasks, setDbTasks] = useState<any[]>([]);
   const [submissionsMap, setSubmissionsMap] = useState<{ [key: string]: any }>({});
+
+  // Riwayat poin (tab "histori")
+  const [pointHistory, setPointHistory] = useState<PointHistoryItem[]>([]);
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false);
 
   const [isAccessBlocked, setIsAccessBlocked] = useState(false);
 
@@ -226,9 +240,76 @@ export default function PenugasanPage() {
     }
   };
 
+  // 🟢 RIWAYAT POIN: task_awards (tugas tervalidasi) + attendance (presensi)
+  const fetchPointHistory = async () => {
+    if (!currentNim) return;
+    setIsHistoryLoading(true);
+
+    try {
+      // Poin tugas yang sudah divalidasi
+      const { data: awards } = await supabase
+        .from("task_awards")
+        .select("task_id, awarded_points, recorded_at")
+        .eq("user_nim", currentNim)
+        .eq("is_validated", true);
+
+      // Semua tugas (termasuk nonaktif) untuk ambil judul & kategori
+      const { data: allTasks } = await supabase
+        .from("tasks")
+        .select("id, title, category");
+
+      const taskMap: { [key: string]: any } = {};
+      (allTasks || []).forEach((t) => {
+        taskMap[t.id] = t;
+      });
+
+      const taskRows: PointHistoryItem[] = (awards || []).map((a, i) => {
+        const t = taskMap[a.task_id];
+        return {
+          key: `task-${a.task_id}-${i}`,
+          jenis: (t?.category || "TUGAS").toUpperCase(),
+          nama: t?.title || String(a.task_id),
+          poin: Number(a.awarded_points) || 0,
+          waktu: (a.recorded_at as string) || null,
+          isPresensi: false,
+        };
+      });
+
+      // Poin presensi
+      const { data: att } = await supabase
+        .from("attendance")
+        .select("session_name, awarded_points, points_awarded")
+        .eq("user_nim", currentNim)
+        .eq("is_present", true);
+
+      const attRows: PointHistoryItem[] = (att || [])
+        .map((a, i) => ({
+          key: `att-${i}`,
+          jenis: "PRESENSI",
+          nama: `Sesi: ${a.session_name}`,
+          poin: Number(a.awarded_points ?? a.points_awarded ?? 0),
+          waktu: null as string | null,
+          isPresensi: true,
+        }))
+        .filter((r) => r.poin > 0);
+
+      // Tugas: terbaru di atas. Presensi (tanpa tanggal) diletakkan setelahnya.
+      taskRows.sort(
+        (a, b) => new Date(b.waktu || 0).getTime() - new Date(a.waktu || 0).getTime()
+      );
+
+      setPointHistory([...taskRows, ...attRows]);
+    } catch (err) {
+      console.error("Error fetching point history:", err);
+    } finally {
+      setIsHistoryLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (currentNim) {
       fetchData();
+      fetchPointHistory();
     }
   }, [currentNim]);
 
@@ -487,6 +568,7 @@ export default function PenugasanPage() {
       triggerToast("PERUBAHAN DISIMPAN", "Data penugasan berhasil diperbarui!", false);
       setIsEditTaskModalOpen(false);
       fetchData();
+      fetchPointHistory();
     } catch (err: any) {
       triggerToast("GAGAL UPDATE", err.message || "Gagal memperbarui tugas", true);
     } finally {
@@ -750,6 +832,64 @@ export default function PenugasanPage() {
     );
   };
 
+  // 🟢 KARTU RIWAYAT POIN (gaya sama dengan kartu pengumuman/tugas)
+  const renderHistoryCard = (h: PointHistoryItem) => {
+    return (
+      <div
+        key={h.key}
+        className="clickable-task-card"
+        style={{ cursor: "default", marginBottom: "16px", width: "100%", boxSizing: "border-box" }}
+      >
+        <div className="task-card-summary" style={{ display: "flex", alignItems: "center", gap: "16px", width: "100%" }}>
+          <div className="task-icon-box" style={{ flexShrink: 0 }}>
+            {h.isPresensi ? (
+              <CheckCircle2 style={{ width: "22px", height: "22px", color: "#fafafa" }} />
+            ) : (
+              <Award style={{ width: "22px", height: "22px", color: "#fafafa" }} />
+            )}
+          </div>
+
+          <div className="task-summary-text" style={{ flex: 1, minWidth: 0 }}>
+            <span
+              style={{
+                border: "2px solid #1B22A7",
+                color: "#fafafa",
+                fontSize: "10px",
+                fontWeight: 800,
+                padding: "3px 10px",
+                borderRadius: "50px",
+                letterSpacing: "1px",
+                textTransform: "uppercase",
+                display: "inline-block",
+                marginBottom: "6px",
+              }}
+            >
+              {h.jenis}
+            </span>
+            <h3 style={{ margin: 0, fontSize: "16px", color: "#FAFAFA", fontWeight: 700, wordBreak: "break-word" }}>
+              {h.nama}
+            </h3>
+            <span
+              className="task-meta-subtitle"
+              style={{ color: "rgba(250, 250, 250, 0.6)", fontSize: "12px", marginTop: "4px", display: "block" }}
+            >
+              Divalidasi: {h.waktu ? `${formatDateTimeWIB(h.waktu)} WIB` : "-"}
+            </span>
+          </div>
+
+          <div style={{ textAlign: "right", flexShrink: 0 }}>
+            <span style={{ fontSize: "22px", fontWeight: 800, color: "#00FF88", lineHeight: 1 }}>+{h.poin}</span>
+            <span style={{ display: "block", fontSize: "10px", color: "rgba(250, 250, 250, 0.5)", fontWeight: 700, letterSpacing: "1px", marginTop: "2px" }}>
+              POIN
+            </span>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const totalHistoryPoints = pointHistory.reduce((sum, h) => sum + h.poin, 0);
+
   return (
     <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column", position: "relative" }}>
       <div className={isAccessBlocked ? "blur-behind" : ""}>
@@ -841,6 +981,9 @@ export default function PenugasanPage() {
               </button>
               <button type="button" className={`sidebar-btn ${activeTab === "angkatan" ? "active" : ""}`} onClick={() => setActiveTab("angkatan")}>
                 ANGKATAN
+              </button>
+              <button type="button" className={`sidebar-btn ${activeTab === "histori" ? "active" : ""}`} onClick={() => setActiveTab("histori")}>
+                HISTORI POIN
               </button>
             </div>
           </div>
@@ -980,6 +1123,57 @@ export default function PenugasanPage() {
                 <div className="clickable-task-card" style={{ cursor: "default", textAlign: "center", padding: "40px 20px" }}>
                   <Inbox style={{ width: "40px", height: "40px", color: "#666", marginBottom: "10px" }} />
                   <p style={{ color: "#888", fontSize: "14px", margin: 0 }}>Belum ada tugas angkatan.</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === "histori" && (
+            <div className="tab-panel active">
+              {isHistoryLoading && pointHistory.length === 0 ? (
+                <div className="clickable-task-card" style={{ cursor: "default", textAlign: "center", padding: "40px 20px" }}>
+                  <p style={{ color: "#888", fontSize: "14px", margin: 0 }}>Memuat riwayat poin...</p>
+                </div>
+              ) : pointHistory.length > 0 ? (
+                <>
+                  {/* Ringkasan total poin dari riwayat */}
+                  <div
+                    style={{
+                      width: "100%",
+                      boxSizing: "border-box",
+                      marginBottom: "16px",
+                      background: "#0a0a0e",
+                      border: "2px solid #1B22A7",
+                      borderRadius: "14px",
+                      padding: "16px 20px",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: "12px",
+                      flexWrap: "wrap",
+                      boxShadow: "0 4px 20px rgba(0, 0, 0, 0.5)"
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                      <Award size={18} style={{ color: "#fafafa" }} />
+                      <span style={{ fontSize: "11px", color: "#fafafa", fontWeight: 700, textTransform: "uppercase", letterSpacing: "1px" }}>
+                        Total Riwayat Poin
+                      </span>
+                    </div>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: "10px" }}>
+                      <span style={{ fontSize: "24px", fontWeight: 800, color: "#00FF88" }}>+{totalHistoryPoints}</span>
+                      <span style={{ fontSize: "12px", color: "rgba(250, 250, 250, 0.5)", fontWeight: 600 }}>
+                        dari {pointHistory.length} catatan
+                      </span>
+                    </div>
+                  </div>
+
+                  {pointHistory.map(renderHistoryCard)}
+                </>
+              ) : (
+                <div className="clickable-task-card" style={{ cursor: "default", textAlign: "center", padding: "40px 20px" }}>
+                  <Inbox style={{ width: "40px", height: "40px", color: "#666", marginBottom: "10px" }} />
+                  <p style={{ color: "#888", fontSize: "14px", margin: 0 }}>Belum ada riwayat poin.</p>
                 </div>
               )}
             </div>
