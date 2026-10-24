@@ -21,17 +21,32 @@ import {
   Award,
   CheckCircle,
   XCircle,
-  Link2
+  Link2,
+  ChevronDown,
 } from "lucide-react";
 
-// Bentuk satu baris riwayat poin (gabungan tugas + presensi)
+// Kategori riwayat poin
+type HistoryKategori = "individu" | "kelompok" | "angkatan" | "presensi" | "pelanggaran";
+type HistoryFilter = "all" | HistoryKategori;
+
+// Bentuk satu baris riwayat poin (tugas + presensi + pelanggaran)
+// poin > 0 = penambahan, poin < 0 = pengurangan (pelanggaran)
 type PointHistoryItem = {
   key: string;
   jenis: string;
+  kategori: HistoryKategori;
   nama: string;
   poin: number;
   waktu: string | null;
-  isPresensi: boolean;
+};
+
+const HISTORY_FILTER_LABELS: Record<HistoryFilter, string> = {
+  all: "Semua Kategori",
+  individu: "Tugas Individu",
+  kelompok: "Tugas Kelompok",
+  angkatan: "Tugas Angkatan",
+  presensi: "Presensi Kehadiran",
+  pelanggaran: "Pelanggaran",
 };
 
 export default function PenugasanPage() {
@@ -70,6 +85,7 @@ export default function PenugasanPage() {
   // Riwayat poin (tab "histori")
   const [pointHistory, setPointHistory] = useState<PointHistoryItem[]>([]);
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
+  const [historyFilter, setHistoryFilter] = useState<HistoryFilter>("all");
 
   const [isAccessBlocked, setIsAccessBlocked] = useState(false);
 
@@ -175,6 +191,8 @@ export default function PenugasanPage() {
     });
   }, []);
 
+  // Data pengumpulan, pengumuman, dan tugas.
+  // Perhitungan poin TIDAK lagi dilakukan di sini (satu sumber saja: fetchPointHistory).
   const fetchData = async () => {
     if (!currentNim) return;
 
@@ -184,39 +202,12 @@ export default function PenugasanPage() {
         .select("task_id, submitted_at, file_url, file_name, status, nama, is_validated, awarded_points")
         .eq("user_nim", currentNim);
 
-      const { data: attData } = await supabase
-        .from("attendance")
-        .select("session_name, is_present, awarded_points, points_awarded")
-        .eq("user_nim", currentNim)
-        .eq("is_present", true);
-
       if (subData) {
         const map: { [key: string]: any } = {};
-        let calculatedTotalPoints = 0;
-
         subData.forEach((item) => {
           map[item.task_id] = item;
-          if (item.is_validated && item.awarded_points) {
-            calculatedTotalPoints += Number(item.awarded_points);
-          }
         });
-
-        if (attData) {
-          attData.forEach((att) => {
-            const pts = att.awarded_points ?? att.points_awarded;
-            if (pts) {
-              calculatedTotalPoints += Number(pts);
-            }
-          });
-        }
-
         setSubmissionsMap(map);
-        setUserPoints(calculatedTotalPoints);
-
-        await supabase
-          .from("users")
-          .update({ total_points: calculatedTotalPoints })
-          .eq("nim", currentNim);
       }
 
       const { data: annData } = await supabase
@@ -240,18 +231,41 @@ export default function PenugasanPage() {
     }
   };
 
-  // 🟢 RIWAYAT POIN: task_awards (tugas tervalidasi) + attendance (presensi)
+  // 🟢 RIWAYAT POIN: satu sumber kebenaran untuk tab Histori DAN Akumulasi Poin di sidebar
+  //   + Tugas Individu / Kelompok / Angkatan  -> submissions (is_validated = true)
+  //   + Presensi                              -> attendance (is_present = true)
+  //   - Pelanggaran                           -> violations (pengurangan poin)
   const fetchPointHistory = async () => {
     if (!currentNim) return;
     setIsHistoryLoading(true);
 
     try {
-      // Poin tugas yang sudah divalidasi
+      // ===== 1. TUGAS (individu / kelompok / angkatan) =====
+      const { data: subs } = await supabase
+        .from("submissions")
+        .select("task_id, awarded_points, submitted_at")
+        .eq("user_nim", currentNim)
+        .eq("is_validated", true);
+
+      // Hanya untuk mengambil waktu validasi
       const { data: awards } = await supabase
         .from("task_awards")
         .select("task_id, awarded_points, recorded_at")
         .eq("user_nim", currentNim)
         .eq("is_validated", true);
+
+      const awardMap: { [key: string]: any } = {};
+      (awards || []).forEach((a) => {
+        awardMap[a.task_id] = a;
+      });
+
+      // Diagnosa: baris task_awards yang tidak punya submission tervalidasi
+      const subIds = new Set((subs || []).map((s) => s.task_id));
+      (awards || []).forEach((a) => {
+        if (!subIds.has(a.task_id)) {
+          console.warn("task_awards tanpa submission tervalidasi:", a);
+        }
+      });
 
       // Semua tugas (termasuk nonaktif) untuk ambil judul & kategori
       const { data: allTasks } = await supabase
@@ -263,42 +277,88 @@ export default function PenugasanPage() {
         taskMap[t.id] = t;
       });
 
-      const taskRows: PointHistoryItem[] = (awards || []).map((a, i) => {
-        const t = taskMap[a.task_id];
-        return {
-          key: `task-${a.task_id}-${i}`,
-          jenis: (t?.category || "TUGAS").toUpperCase(),
-          nama: t?.title || String(a.task_id),
-          poin: Number(a.awarded_points) || 0,
-          waktu: (a.recorded_at as string) || null,
-          isPresensi: false,
-        };
-      });
+      // Satu tugas = satu baris (hindari duplikat)
+      const uniqueSubs = new Map<string, any>();
+      (subs || []).forEach((s) => uniqueSubs.set(s.task_id, s));
 
-      // Poin presensi
+      const taskRows: PointHistoryItem[] = Array.from(uniqueSubs.values())
+        .filter((s) => Number(s.awarded_points) > 0)
+        .map((s, i) => {
+          const t = taskMap[s.task_id];
+          const rawKategori = String(t?.category || "individu").toLowerCase();
+          const kategori: HistoryKategori =
+            rawKategori === "kelompok" || rawKategori === "angkatan" ? rawKategori : "individu";
+          return {
+            key: `task-${s.task_id}-${i}`,
+            jenis: `TUGAS ${kategori.toUpperCase()}`,
+            kategori,
+            nama: t?.title || String(s.task_id),
+            poin: Number(s.awarded_points) || 0,
+            waktu: awardMap[s.task_id]?.recorded_at || s.submitted_at || null,
+          };
+        });
+
+      // ===== 2. PRESENSI =====
       const { data: att } = await supabase
         .from("attendance")
-        .select("session_name, awarded_points, points_awarded")
+        .select("*")
         .eq("user_nim", currentNim)
         .eq("is_present", true);
 
       const attRows: PointHistoryItem[] = (att || [])
-        .map((a, i) => ({
+        .map((a: any, i: number) => ({
           key: `att-${i}`,
           jenis: "PRESENSI",
+          kategori: "presensi" as HistoryKategori,
           nama: `Sesi: ${a.session_name}`,
           poin: Number(a.awarded_points ?? a.points_awarded ?? 0),
-          waktu: null as string | null,
-          isPresensi: true,
+          waktu: (a.created_at ?? a.recorded_at ?? null) as string | null,
         }))
         .filter((r) => r.poin > 0);
 
-      // Tugas: terbaru di atas. Presensi (tanpa tanggal) diletakkan setelahnya.
-      taskRows.sort(
-        (a, b) => new Date(b.waktu || 0).getTime() - new Date(a.waktu || 0).getTime()
-      );
+      // ===== 3. PELANGGARAN (pengurangan poin) =====
+      // CATATAN: nama tabel & kolom di bawah masih ASUMSI (detail menyusul).
+      // Sesuaikan "violations" dan nama kolomnya dengan skema Supabase Anda.
+      let violRows: PointHistoryItem[] = [];
+      const { data: viol, error: violError } = await supabase
+        .from("violations")
+        .select("*")
+        .eq("user_nim", currentNim);
 
-      setPointHistory([...taskRows, ...attRows]);
+      if (violError) {
+        console.warn("Gagal memuat pelanggaran (cek nama tabel/kolom):", violError.message);
+      } else {
+        violRows = (viol || [])
+          .map((v: any, i: number) => {
+            const nilai = Number(
+              v.deducted_points ?? v.points_deducted ?? v.pengurangan_poin ?? v.points ?? v.poin ?? 0
+            );
+            return {
+              key: `viol-${v.id ?? i}`,
+              jenis: "PELANGGARAN",
+              kategori: "pelanggaran" as HistoryKategori,
+              nama: String(v.keterangan ?? v.description ?? v.reason ?? v.jenis_pelanggaran ?? v.title ?? "Pelanggaran"),
+              poin: -Math.abs(nilai), // selalu negatif
+              waktu: (v.created_at ?? v.recorded_at ?? null) as string | null,
+            };
+          })
+          .filter((r) => r.poin !== 0);
+      }
+
+      // ===== Gabungkan & urutkan: terbaru di atas, tanpa tanggal di akhir =====
+      const rows = [...taskRows, ...attRows, ...violRows].sort((a, b) => {
+        if (!a.waktu && !b.waktu) return 0;
+        if (!a.waktu) return 1;
+        if (!b.waktu) return -1;
+        return new Date(b.waktu).getTime() - new Date(a.waktu).getTime();
+      });
+
+      setPointHistory(rows);
+
+      // Akumulasi di sidebar = total riwayat (pasti sama)
+      const total = rows.reduce((sum, r) => sum + r.poin, 0);
+      setUserPoints(total);
+      await supabase.from("users").update({ total_points: total }).eq("nim", currentNim);
     } catch (err) {
       console.error("Error fetching point history:", err);
     } finally {
@@ -714,25 +774,25 @@ export default function PenugasanPage() {
                 
                 {userSubmission && userSubmission.is_validated && (
                   <span style={{ border: `1px solid ${themeColor}`, color: themeColor, fontSize: "10px", fontWeight: "800", padding: "3px 10px", borderRadius: "50px", letterSpacing: "1px", textTransform: "uppercase", display: "inline-flex", alignItems: "center", gap: "4px", whiteSpace: "nowrap" }}>
-                    {isLate ? <AlertCircle style={{ width: "12px", height: "12px" }} /> : <CheckCircle2 style={{ width: "12px", height: "12px" }} />} TERVALIDASI
+                    TERVALIDASI
                   </span>
                 )}
 
                 {userSubmission && !userSubmission.is_validated && (
                   <span style={{ border: "2px solid #1B22A7", color: "#fafafa", fontSize: "10px", fontWeight: "800", padding: "3px 10px", borderRadius: "50px", letterSpacing: "1px", textTransform: "uppercase", display: "inline-flex", alignItems: "center", gap: "4px", whiteSpace: "nowrap" }}>
-                    ⏳ MENUNGGU VALIDASI
+                    MENUNGGU VALIDASI
                   </span>
                 )}
 
                 {isSubmitted && !isLate && (
                   <span style={{ border: "1px solid #00FF88", color: "#00FF88", fontSize: "10px", fontWeight: "800", padding: "3px 10px", borderRadius: "50px", letterSpacing: "1px", textTransform: "uppercase", display: "inline-flex", alignItems: "center", gap: "4px", whiteSpace: "nowrap" }}>
-                    <CheckCircle2 style={{ width: "12px", height: "12px" }} /> TEPAT WAKTU
+                    TEPAT WAKTU
                   </span>
                 )}
 
                 {(isSubmitted && isLate) || (!isSubmitted && isLate) ? (
                   <span style={{ border: "1px solid #FF3333", color: "#FF3333", fontSize: "10px", fontWeight: "800", padding: "3px 10px", borderRadius: "50px", letterSpacing: "1px", textTransform: "uppercase", display: "inline-flex", alignItems: "center", gap: "4px", whiteSpace: "nowrap" }}>
-                    <AlertCircle style={{ width: "12px", height: "12px" }} /> TERLAMBAT
+                    TERLAMBAT
                   </span>
                 ) : null}
               </div>
@@ -833,16 +893,40 @@ export default function PenugasanPage() {
   };
 
   // 🟢 KARTU RIWAYAT POIN (gaya sama dengan kartu pengumuman/tugas)
+  // Penambahan = hijau, pengurangan (pelanggaran) = merah
   const renderHistoryCard = (h: PointHistoryItem) => {
+    const isPelanggaran = h.kategori === "pelanggaran";
+    const isPresensi = h.kategori === "presensi";
+    const accent = isPelanggaran ? "#FF3333" : "#00FF88";
+    const waktuLabel = isPelanggaran ? "Dicatat" : isPresensi ? "Tercatat" : "Divalidasi";
+
     return (
       <div
         key={h.key}
         className="clickable-task-card"
-        style={{ cursor: "default", marginBottom: "16px", width: "100%", boxSizing: "border-box" }}
+        style={{
+          cursor: "default",
+          marginBottom: "16px",
+          width: "100%",
+          boxSizing: "border-box",
+          ...(isPelanggaran
+            ? { border: "2px solid #FF3333", backgroundColor: "rgba(255, 51, 51, 0.04)" }
+            : {})
+        }}
       >
         <div className="task-card-summary" style={{ display: "flex", alignItems: "center", gap: "16px", width: "100%" }}>
-          <div className="task-icon-box" style={{ flexShrink: 0 }}>
-            {h.isPresensi ? (
+          <div
+            className="task-icon-box"
+            style={{
+              flexShrink: 0,
+              ...(isPelanggaran
+                ? { border: "1.5px solid #FF3333", background: "rgba(255, 51, 51, 0.2)" }
+                : {})
+            }}
+          >
+            {isPelanggaran ? (
+              <ShieldAlert style={{ width: "22px", height: "22px", color: "#FF3333" }} />
+            ) : isPresensi ? (
               <CheckCircle2 style={{ width: "22px", height: "22px", color: "#fafafa" }} />
             ) : (
               <Award style={{ width: "22px", height: "22px", color: "#fafafa" }} />
@@ -852,8 +936,8 @@ export default function PenugasanPage() {
           <div className="task-summary-text" style={{ flex: 1, minWidth: 0 }}>
             <span
               style={{
-                border: "2px solid #1B22A7",
-                color: "#fafafa",
+                border: isPelanggaran ? "2px solid #FF3333" : "2px solid #1B22A7",
+                color: isPelanggaran ? "#FF3333" : "#fafafa",
                 fontSize: "10px",
                 fontWeight: 800,
                 padding: "3px 10px",
@@ -873,12 +957,14 @@ export default function PenugasanPage() {
               className="task-meta-subtitle"
               style={{ color: "rgba(250, 250, 250, 0.6)", fontSize: "12px", marginTop: "4px", display: "block" }}
             >
-              Divalidasi: {h.waktu ? `${formatDateTimeWIB(h.waktu)} WIB` : "-"}
+              {waktuLabel}: {h.waktu ? `${formatDateTimeWIB(h.waktu)} WIB` : "-"}
             </span>
           </div>
 
           <div style={{ textAlign: "right", flexShrink: 0 }}>
-            <span style={{ fontSize: "22px", fontWeight: 800, color: "#00FF88", lineHeight: 1 }}>+{h.poin}</span>
+            <span style={{ fontSize: "22px", fontWeight: 800, color: accent, lineHeight: 1 }}>
+              {h.poin > 0 ? `+${h.poin}` : h.poin}
+            </span>
             <span style={{ display: "block", fontSize: "10px", color: "rgba(250, 250, 250, 0.5)", fontWeight: 700, letterSpacing: "1px", marginTop: "2px" }}>
               POIN
             </span>
@@ -888,7 +974,13 @@ export default function PenugasanPage() {
     );
   };
 
-  const totalHistoryPoints = pointHistory.reduce((sum, h) => sum + h.poin, 0);
+  // Nilai turunan untuk tab histori
+  const filteredHistory = pointHistory.filter(
+    (h) => historyFilter === "all" || h.kategori === historyFilter
+  );
+  const totalHistoryPoints = filteredHistory.reduce((sum, h) => sum + h.poin, 0);
+  const totalHistoryText = totalHistoryPoints > 0 ? `+${totalHistoryPoints}` : `${totalHistoryPoints}`;
+  const totalHistoryColor = totalHistoryPoints < 0 ? "#FF3333" : "#00FF88";
 
   return (
     <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column", position: "relative" }}>
@@ -996,7 +1088,7 @@ export default function PenugasanPage() {
                   <Award size={16} style={{ color: "#fafafa" }} />
                 </div>
                 <div style={{ display: "flex", alignItems: "baseline", gap: "6px", marginBottom: "12px" }}>
-                  <span style={{ fontSize: "24px", fontWeight: 800, color: "#FAFAFA" }}>{userPoints}</span>
+                  <span style={{ fontSize: "24px", fontWeight: 800, color: userPoints < 0 ? "#FF3333" : "#FAFAFA" }}>{userPoints}</span>
                   <span style={{ fontSize: "13px", color: "rgba(250, 250, 250, 0.5)", fontWeight: 600 }}>/ 2.300</span>
                 </div>
 
@@ -1008,7 +1100,7 @@ export default function PenugasanPage() {
                     </div>
                   ) : (
                     <div style={{ background: "transparent", border: "2px solid #1B22A7", color: "rgba(250, 250, 250, 0.5)", padding: "6px 10px", borderRadius: "50px", fontSize: "11px", fontWeight: 800, display: "flex", alignItems: "center", gap: "6px" }}>
-                      ⏳ MENUNGGU KEPUTUSAN
+                      MENUNGGU KEPUTUSAN
                     </div>
                   )}
                 </div>
@@ -1136,7 +1228,42 @@ export default function PenugasanPage() {
                 </div>
               ) : pointHistory.length > 0 ? (
                 <>
-                  {/* Ringkasan total poin dari riwayat */}
+                  {/* Filter kategori riwayat poin */}
+                  <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "16px" }}>
+                    <div style={{ position: "relative", width: "280px", maxWidth: "100%" }}>
+                      <select
+                        value={historyFilter}
+                        onChange={(e) => setHistoryFilter(e.target.value as HistoryFilter)}
+                        style={{
+                          appearance: "none",
+                          WebkitAppearance: "none",
+                          MozAppearance: "none",
+                          width: "100%",
+                          background: "#0a0a0e",
+                          border: "1.5px solid #1B22A7",
+                          color: "#FAFAFA",
+                          padding: "10px 38px 10px 16px",
+                          borderRadius: "50px",
+                          fontSize: "13px",
+                          fontWeight: 700,
+                          cursor: "pointer",
+                          outline: "none",
+                        }}
+                      >
+                        {(Object.keys(HISTORY_FILTER_LABELS) as HistoryFilter[]).map((k) => (
+                          <option key={k} value={k} style={{ background: "#0a0a0e", color: "#FAFAFA" }}>
+                            {HISTORY_FILTER_LABELS[k]}
+                          </option>
+                        ))}
+                      </select>
+                      <ChevronDown
+                        size={16}
+                        style={{ position: "absolute", right: "14px", top: "50%", transform: "translateY(-50%)", color: "#FAFAFA", pointerEvents: "none" }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Ringkasan total poin sesuai filter */}
                   <div
                     style={{
                       width: "100%",
@@ -1157,18 +1284,27 @@ export default function PenugasanPage() {
                     <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
                       <Award size={18} style={{ color: "#fafafa" }} />
                       <span style={{ fontSize: "11px", color: "#fafafa", fontWeight: 700, textTransform: "uppercase", letterSpacing: "1px" }}>
-                        Total Riwayat Poin
+                        {historyFilter === "all" ? "Total Riwayat Poin" : `Total Poin ${HISTORY_FILTER_LABELS[historyFilter]}`}
                       </span>
                     </div>
                     <div style={{ display: "flex", alignItems: "baseline", gap: "10px" }}>
-                      <span style={{ fontSize: "24px", fontWeight: 800, color: "#00FF88" }}>+{totalHistoryPoints}</span>
+                      <span style={{ fontSize: "24px", fontWeight: 800, color: totalHistoryColor }}>{totalHistoryText}</span>
                       <span style={{ fontSize: "12px", color: "rgba(250, 250, 250, 0.5)", fontWeight: 600 }}>
-                        dari {pointHistory.length} catatan
+                        dari {filteredHistory.length} catatan
                       </span>
                     </div>
                   </div>
 
-                  {pointHistory.map(renderHistoryCard)}
+                  {filteredHistory.length > 0 ? (
+                    filteredHistory.map(renderHistoryCard)
+                  ) : (
+                    <div className="clickable-task-card" style={{ cursor: "default", textAlign: "center", padding: "40px 20px" }}>
+                      <Inbox style={{ width: "40px", height: "40px", color: "#666", marginBottom: "10px" }} />
+                      <p style={{ color: "#888", fontSize: "14px", margin: 0 }}>
+                        Belum ada riwayat poin untuk kategori ini.
+                      </p>
+                    </div>
+                  )}
                 </>
               ) : (
                 <div className="clickable-task-card" style={{ cursor: "default", textAlign: "center", padding: "40px 20px" }}>
