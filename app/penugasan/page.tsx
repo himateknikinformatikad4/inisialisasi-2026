@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { useRouter } from "next/navigation";
 import Navbar from "@/components/Navbar";
@@ -20,7 +20,6 @@ import {
   ExternalLink,
   Award,
   CheckCircle,
-  XCircle,
   Link2,
   ChevronDown,
 } from "lucide-react";
@@ -77,6 +76,10 @@ export default function PenugasanPage() {
   const [isGraduatedStatus, setIsGraduatedStatus] = useState<boolean>(false);
   const [graduationLabel, setGraduationLabel] = useState<string>("TIDAK LULUS");
   const [isLoaded, setIsLoaded] = useState(false);
+
+  // Nilai total_points yang tersimpan di database (untuk menghindari update yang tidak perlu)
+  const dbTotalPointsRef = useRef<number | null>(null);
+  const dbRoleRef = useRef<string>("");
 
   const [dbAnnouncements, setDbAnnouncements] = useState<any[]>([]);
   const [dbTasks, setDbTasks] = useState<any[]>([]);
@@ -177,7 +180,9 @@ export default function PenugasanPage() {
     supabase.from("users").select("role, nama, total_points, is_graduated, graduation_status, kelompok").eq("nim", savedNim).single().then(({ data }) => {
       if (data) {
         setUserRole(data.role || "mahasiswa");
+        dbRoleRef.current = data.role || "mahasiswa";
         setUserPoints(data.total_points || 0);
+        dbTotalPointsRef.current = data.total_points ?? 0;
         setIsGraduatedStatus(data.is_graduated || false);
         if (data.kelompok) setUserKelompok(data.kelompok);
         if (data.graduation_status) setGraduationLabel(data.graduation_status);
@@ -192,7 +197,7 @@ export default function PenugasanPage() {
   }, []);
 
   // Data pengumpulan, pengumuman, dan tugas.
-  // Perhitungan poin TIDAK lagi dilakukan di sini (satu sumber saja: fetchPointHistory).
+  // Perhitungan poin TIDAK dilakukan di sini (satu sumber saja: fetchPointHistory).
   const fetchData = async () => {
     if (!currentNim) return;
 
@@ -232,7 +237,8 @@ export default function PenugasanPage() {
   };
 
   // 🟢 RIWAYAT POIN: satu sumber kebenaran untuk tab Histori DAN Akumulasi Poin di sidebar
-  //   + Tugas Individu / Kelompok / Angkatan  -> submissions (is_validated = true)
+  //   + Tugas Individu / Kelompok / Angkatan  -> task_awards (utama, termasuk poin hasil distribusi)
+  //                                              + submissions tervalidasi (cadangan bila belum ada di task_awards)
   //   + Presensi                              -> attendance (is_present = true)
   //   - Pelanggaran                           -> violations (pengurangan poin)
   const fetchPointHistory = async () => {
@@ -240,70 +246,103 @@ export default function PenugasanPage() {
     setIsHistoryLoading(true);
 
     try {
-      // ===== 1. TUGAS (individu / kelompok / angkatan) =====
-      const { data: subs } = await supabase
-        .from("submissions")
-        .select("task_id, awarded_points, submitted_at")
-        .eq("user_nim", currentNim)
-        .eq("is_validated", true);
+      let hasQueryError = false;
 
-      // Hanya untuk mengambil waktu validasi
-      const { data: awards } = await supabase
+      // ===== 1. TUGAS (individu / kelompok / angkatan) =====
+
+      // SUMBER UTAMA: task_awards. Berisi poin yang dikumpulkan sendiri
+      // maupun poin hasil distribusi kelompok/angkatan (anggota yang tidak mengumpulkan).
+      const { data: awards, error: awardsError } = await supabase
         .from("task_awards")
         .select("task_id, awarded_points, recorded_at")
         .eq("user_nim", currentNim)
         .eq("is_validated", true);
 
-      const awardMap: { [key: string]: any } = {};
-      (awards || []).forEach((a) => {
-        awardMap[a.task_id] = a;
-      });
+      if (awardsError) {
+        hasQueryError = true;
+        console.error("Gagal memuat task_awards:", awardsError.message);
+      }
 
-      // Diagnosa: baris task_awards yang tidak punya submission tervalidasi
-      const subIds = new Set((subs || []).map((s) => s.task_id));
-      (awards || []).forEach((a) => {
-        if (!subIds.has(a.task_id)) {
-          console.warn("task_awards tanpa submission tervalidasi:", a);
-        }
-      });
+      // CADANGAN: submissions tervalidasi milik sendiri
+      // (untuk tugas yang belum punya baris di task_awards)
+      const { data: subs, error: subsError } = await supabase
+        .from("submissions")
+        .select("task_id, awarded_points, submitted_at")
+        .eq("user_nim", currentNim)
+        .eq("is_validated", true);
+
+      if (subsError) {
+        hasQueryError = true;
+        console.error("Gagal memuat submissions:", subsError.message);
+      }
 
       // Semua tugas (termasuk nonaktif) untuk ambil judul & kategori
-      const { data: allTasks } = await supabase
+      const { data: allTasks, error: tasksError } = await supabase
         .from("tasks")
         .select("id, title, category");
+
+      if (tasksError) {
+        hasQueryError = true;
+        console.error("Gagal memuat tasks:", tasksError.message);
+      }
 
       const taskMap: { [key: string]: any } = {};
       (allTasks || []).forEach((t) => {
         taskMap[t.id] = t;
       });
 
-      // Satu tugas = satu baris (hindari duplikat)
-      const uniqueSubs = new Map<string, any>();
-      (subs || []).forEach((s) => uniqueSubs.set(s.task_id, s));
+      // Satu tugas = satu entri (hindari duplikat). task_awards didahulukan.
+      const merged = new Map<string, { task_id: string; poin: number; waktu: string | null }>();
 
-      const taskRows: PointHistoryItem[] = Array.from(uniqueSubs.values())
-        .filter((s) => Number(s.awarded_points) > 0)
-        .map((s, i) => {
-          const t = taskMap[s.task_id];
-          const rawKategori = String(t?.category || "individu").toLowerCase();
+      (awards || []).forEach((a) => {
+        const poin = Number(a.awarded_points) || 0;
+        const existing = merged.get(a.task_id);
+        // Jika ada lebih dari satu baris untuk tugas yang sama, ambil yang terbaru
+        if (
+          !existing ||
+          (a.recorded_at && (!existing.waktu || new Date(a.recorded_at) > new Date(existing.waktu)))
+        ) {
+          merged.set(a.task_id, { task_id: a.task_id, poin, waktu: a.recorded_at || null });
+        }
+      });
+
+      (subs || []).forEach((s) => {
+        if (merged.has(s.task_id)) return; // sudah ada dari task_awards
+        merged.set(s.task_id, {
+          task_id: s.task_id,
+          poin: Number(s.awarded_points) || 0,
+          waktu: s.submitted_at || null,
+        });
+      });
+
+      const taskRows: PointHistoryItem[] = Array.from(merged.values())
+        .filter((m) => m.poin > 0)
+        .map((m, i) => {
+          const t = taskMap[m.task_id];
+          const rawKategori = String(t?.category || "individu").trim().toLowerCase();
           const kategori: HistoryKategori =
             rawKategori === "kelompok" || rawKategori === "angkatan" ? rawKategori : "individu";
           return {
-            key: `task-${s.task_id}-${i}`,
+            key: `task-${m.task_id}-${i}`,
             jenis: `TUGAS ${kategori.toUpperCase()}`,
             kategori,
-            nama: t?.title || String(s.task_id),
-            poin: Number(s.awarded_points) || 0,
-            waktu: awardMap[s.task_id]?.recorded_at || s.submitted_at || null,
+            nama: t?.title || String(m.task_id),
+            poin: m.poin,
+            waktu: m.waktu,
           };
         });
 
       // ===== 2. PRESENSI =====
-      const { data: att } = await supabase
+      const { data: att, error: attError } = await supabase
         .from("attendance")
         .select("*")
         .eq("user_nim", currentNim)
         .eq("is_present", true);
+
+      if (attError) {
+        hasQueryError = true;
+        console.error("Gagal memuat presensi:", attError.message);
+      }
 
       const attRows: PointHistoryItem[] = (att || [])
         .map((a: any, i: number) => ({
@@ -319,6 +358,7 @@ export default function PenugasanPage() {
       // ===== 3. PELANGGARAN (pengurangan poin) =====
       // CATATAN: nama tabel & kolom di bawah masih ASUMSI (detail menyusul).
       // Sesuaikan "violations" dan nama kolomnya dengan skema Supabase Anda.
+      // Error di sini tidak dianggap fatal (tabel mungkin memang belum ada).
       let violRows: PointHistoryItem[] = [];
       const { data: viol, error: violError } = await supabase
         .from("violations")
@@ -358,7 +398,22 @@ export default function PenugasanPage() {
       // Akumulasi di sidebar = total riwayat (pasti sama)
       const total = rows.reduce((sum, r) => sum + r.poin, 0);
       setUserPoints(total);
-      await supabase.from("users").update({ total_points: total }).eq("nim", currentNim);
+
+      // Simpan ke database HANYA bila semua query sukses, angkanya berubah,
+      // dan user bukan admin/panitia. Mencegah total tertimpa angka salah.
+      const role = dbRoleRef.current || userRole;
+      const isStaff = role === "admin" || role === "panitia";
+      if (!hasQueryError && !isStaff && dbTotalPointsRef.current !== total) {
+        const { error: updError } = await supabase
+          .from("users")
+          .update({ total_points: total })
+          .eq("nim", currentNim);
+        if (updError) {
+          console.error("Gagal memperbarui total_points:", updError.message);
+        } else {
+          dbTotalPointsRef.current = total;
+        }
+      }
     } catch (err) {
       console.error("Error fetching point history:", err);
     } finally {
@@ -402,7 +457,7 @@ export default function PenugasanPage() {
     return `https://${rawUrl}`;
   };
 
-  // 🟢 FUNGSI PENGIRIMAN TUGAS YANG DIOPTIMALKAN (TANPA FREEZE UNTUK LINK PANJANG/DRIVE)
+  // 🟢 FUNGSI PENGIRIMAN TUGAS (TANPA FREEZE UNTUK LINK PANJANG/DRIVE)
   const handleUploadSubmit = async () => {
     if (!activeTaskId || !currentNim) return;
 
@@ -423,7 +478,7 @@ export default function PenugasanPage() {
     setIsUploading(true);
 
     try {
-      // 1. Mode Pengiriman Tautan (Link) - Dioptimalkan untuk Link Google Drive Panjang
+      // 1. Mode Pengiriman Tautan (Link)
       if (submissionMode === "link") {
         const cleanLink = submissionLink.trim();
         if (!cleanLink) {
@@ -1536,7 +1591,7 @@ export default function PenugasanPage() {
               </div>
 
               <div style={{ display: "flex", gap: "10px", marginTop: "15px" }}>
-                <button type="button" onClick={handleSaveEditTask} className="btn-modal-primary" disabled={isUploading} style={{ background: "#00FF88", color: "#00FF88", fontWeight: 700 }}>
+                <button type="button" onClick={handleSaveEditTask} className="btn-modal-primary" disabled={isUploading} style={{ background: "#00FF88", color: "#0a0a0e", fontWeight: 700 }}>
                   {isUploading ? "MENYIMPAN..." : "SIMPAN PERUBAHAN"}
                 </button>
                 <button type="button" onClick={() => setIsEditTaskModalOpen(false)} className="btn-modal-close">BATAL</button>
@@ -1577,7 +1632,7 @@ export default function PenugasanPage() {
               </div>
 
               <div style={{ display: "flex", gap: "10px", marginTop: "15px" }}>
-                <button type="button" onClick={handleSaveEditAnn} className="btn-modal-primary" disabled={isUploading} style={{ background: "#00FF88", color: "#00FF88", fontWeight: 700 }}>
+                <button type="button" onClick={handleSaveEditAnn} className="btn-modal-primary" disabled={isUploading} style={{ background: "#00FF88", color: "#0a0a0e", fontWeight: 700 }}>
                   {isUploading ? "MENYIMPAN..." : "SIMPAN PERUBAHAN"}
                 </button>
                 <button type="button" onClick={() => setIsEditAnnModalOpen(false)} className="btn-modal-close">BATAL</button>
