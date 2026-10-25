@@ -116,7 +116,7 @@ export default function Home() {
         <section id="about" className="about-section">
           <div className="container about-container-flex">
             <div className="about-text-card">
-              <div className="about-badge-pill">WHAT IS INISIALISASI</div>
+              <div className="about-badge-pill">WHAT IS INISIALISASI?</div>
               <h2 className="about-card-title">
                 Memulai Babak Baru<br />
                 <span className="about-title-spacing typewriter-text">

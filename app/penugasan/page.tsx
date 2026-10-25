@@ -12,7 +12,6 @@ import {
   AlertCircle, 
   UploadCloud, 
   FileCheck,
-  User,
   ShieldAlert,
   Inbox,
   Pencil,
@@ -750,13 +749,20 @@ export default function PenugasanPage() {
     return { isSubmitted: true, isLate: isLateSubmitted };
   };
 
+  // 🟢 IKON TUGAS
+  // Sudah dikumpulkan (atau sudah lewat deadline) -> ikon kertas, merah jika terlambat, hijau jika tepat waktu.
+  // Belum dikumpulkan & belum lewat deadline     -> kertas putih (individu) / ikon Users (kelompok & angkatan).
   const renderTaskIcon = (task: any, isLate: boolean) => {
     const { isSubmitted } = getTaskSubmissionStatus(task);
     if (isSubmitted || isLate) {
-      return isLate ? (
-        <AlertCircle style={{ width: "22px", height: "22px", color: "#FF3333" }} />
-      ) : (
-        <CheckCircle2 style={{ width: "22px", height: "22px", color: "#00FF88" }} />
+      return (
+        <FileText
+          style={{
+            width: "22px",
+            height: "22px",
+            color: isLate ? "#FF3333" : "#00FF88",
+          }}
+        />
       );
     }
     if (task.category === "kelompok" || task.category === "angkatan") {
@@ -834,7 +840,7 @@ export default function PenugasanPage() {
                 )}
 
                 {userSubmission && !userSubmission.is_validated && (
-                  <span style={{ border: "2px solid #1B22A7", color: "#fafafa", fontSize: "10px", fontWeight: "800", padding: "3px 10px", borderRadius: "50px", letterSpacing: "1px", textTransform: "uppercase", display: "inline-flex", alignItems: "center", gap: "4px", whiteSpace: "nowrap" }}>
+                  <span style={{ border: "2px solid #fafafa", color: "#fafafa", fontSize: "10px", fontWeight: "800", padding: "3px 10px", borderRadius: "50px", letterSpacing: "1px", textTransform: "uppercase", display: "inline-flex", alignItems: "center", gap: "4px", whiteSpace: "nowrap" }}>
                     MENUNGGU VALIDASI
                   </span>
                 )}
@@ -1084,7 +1090,6 @@ export default function PenugasanPage() {
                 alignItems: "center", 
                 gap: "6px" 
               }}>
-                {userRole === "admin" ? <ShieldAlert size={0} style={{ color: "#FF3333" }} /> : <User size={13} style={{ color: "#fafafa" }} />}
                 <span style={{ fontSize: "11px", color: userRole === "admin" ? "#FF3333" : "#fafafa", fontWeight: 700, textTransform: "uppercase" }}>
                   {userNama || "MEMUAT..."}
                 </span>
@@ -1130,7 +1135,7 @@ export default function PenugasanPage() {
                 ANGKATAN
               </button>
               <button type="button" className={`sidebar-btn ${activeTab === "histori" ? "active" : ""}`} onClick={() => setActiveTab("histori")}>
-                HISTORI POIN
+                RIWAYAT POIN
               </button>
             </div>
           </div>

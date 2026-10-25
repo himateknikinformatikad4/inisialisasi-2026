@@ -303,8 +303,8 @@ a.btn-outline:active,
   align-items: center;
   justify-content: center;
   padding: 10px 24px;
-  border: 2px solid #1B22A7;
-  background: rgba(27, 34, 167, 0.08);
+  border: 1.5px solid #1B22A7;
+  background: transparent !important;
   color: #FAFAFB !important;
   text-decoration: none;
   border-radius: 50px;
