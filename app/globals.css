@@ -11,11 +11,19 @@
 
 /* ===================================================
    2. GLOBAL RESET & GRID TECH BACKGROUND PATTERN
+   ---------------------------------------------------
+   PERBAIKAN: reset `* { margin:0; padding:0 }` DIHAPUS.
+   CSS tanpa @layer selalu mengalahkan utilitas Tailwind v4
+   (yang berada di dalam @layer), sehingga semua p-*, px-*,
+   mb-*, dll. menjadi 0. Preflight Tailwind sudah melakukan
+   reset yang sama, jadi cukup box-sizing di dalam layer.
    =================================================== */
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
 }
 
 main {
@@ -303,8 +311,8 @@ a.btn-outline:active,
   align-items: center;
   justify-content: center;
   padding: 10px 24px;
-  border: 1.5px solid #1B22A7;
-  background: transparent !important;
+  border: 2px solid #1B22A7;
+  background: rgba(27, 34, 167, 0.08);
   color: #FAFAFB !important;
   text-decoration: none;
   border-radius: 50px;
@@ -386,6 +394,12 @@ a.btn-outline:active,
 
 /* ===================================================
    7. DASHBOARD & PENUGASAN STYLING (RESPONSIF DIPERBARUI)
+   ---------------------------------------------------
+   Struktur yang dipakai (penugasan & admin):
+   <div.dashboard-container>
+     <aside.task-sidebar/>
+     <main/>
+   </div>
    =================================================== */
 .dashboard-container {
   display: flex !important;
