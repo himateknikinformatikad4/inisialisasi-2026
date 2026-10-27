@@ -220,7 +220,7 @@ export default function PenugasanPage() {
         .from("announcements")
         .select("*")
         .eq("is_active", true)
-        .order("created_at", { ascending: true });
+        .order("created_at", { ascending: false });
 
       if (annData) setDbAnnouncements(annData);
 
