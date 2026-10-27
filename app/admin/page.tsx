@@ -1291,13 +1291,13 @@ export default function AdminPage() {
                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
                   <thead>
                     <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.1)", color: "#fafafa", textAlign: "left", fontSize: "11px", textTransform: "uppercase", letterSpacing: "0.5px" }}>
-                      <th style={{ padding: "12px 10px" }}>NIM</th>
-                      <th style={{ padding: "12px 10px" }}>NAMA</th>
-                      <th style={{ padding: "12px 10px" }}>KELOMPOK</th>
-                      <th style={{ padding: "12px 10px" }}>JUDUL TUGAS</th>
-                      <th style={{ padding: "12px 10px" }}>WAKTU PENGUMPULAN</th>
-                      <th style={{ padding: "12px 10px" }}>BERKAS</th>
-                      <th style={{ padding: "12px 10px" }}>VALIDASI</th>
+                      <th style={{ padding: "12px 10px", textAlign: "center" }}>NIM</th>
+                      <th style={{ padding: "12px 10px", textAlign: "center" }}>NAMA</th>
+                      <th style={{ padding: "12px 10px", textAlign: "center" }}>KELOMPOK</th>
+                      <th style={{ padding: "12px 10px", textAlign: "center" }}>JUDUL TUGAS</th>
+                      <th style={{ padding: "12px 10px", textAlign: "center" }}>WAKTU PENGUMPULAN</th>
+                      <th style={{ padding: "12px 10px", textAlign: "center" }}>BERKAS</th>
+                      <th style={{ padding: "12px 10px", textAlign: "center" }}>VALIDASI</th>
                     </tr>
                   </thead>
                   <tbody>
