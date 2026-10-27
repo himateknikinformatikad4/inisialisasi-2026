@@ -228,7 +228,7 @@ export default function PenugasanPage() {
         .from("tasks")
         .select("*")
         .eq("is_active", true)
-        .order("created_at", { ascending: true });
+        .order("created_at", { ascending: false });
 
       if (taskData) setDbTasks(taskData);
 
