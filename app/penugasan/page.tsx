@@ -29,6 +29,7 @@ type HistoryFilter = "all" | HistoryKategori;
 
 // Bentuk satu baris riwayat poin (tugas + presensi + pelanggaran)
 // poin > 0 = penambahan, poin < 0 = pengurangan (pelanggaran)
+// detail = keterangan tambahan (dipakai untuk keterangan pelanggaran)
 type PointHistoryItem = {
   key: string;
   jenis: string;
@@ -36,6 +37,7 @@ type PointHistoryItem = {
   nama: string;
   poin: number;
   waktu: string | null;
+  detail?: string;
 };
 
 const HISTORY_FILTER_LABELS: Record<HistoryFilter, string> = {
@@ -239,7 +241,7 @@ export default function PenugasanPage() {
   //   + Tugas Individu / Kelompok / Angkatan  -> task_awards (utama, termasuk poin hasil distribusi)
   //                                              + submissions tervalidasi (cadangan bila belum ada di task_awards)
   //   + Presensi                              -> attendance (is_present = true)
-  //   - Pelanggaran                           -> violations (pengurangan poin)
+  //   - Pelanggaran                           -> violations (pengurangan poin + keterangan)
   const fetchPointHistory = async () => {
     if (!currentNim) return;
     setIsHistoryLoading(true);
@@ -355,34 +357,28 @@ export default function PenugasanPage() {
         .filter((r) => r.poin > 0);
 
       // ===== 3. PELANGGARAN (pengurangan poin) =====
-      // CATATAN: nama tabel & kolom di bawah masih ASUMSI (detail menyusul).
-      // Sesuaikan "violations" dan nama kolomnya dengan skema Supabase Anda.
-      // Error di sini tidak dianggap fatal (tabel mungkin memang belum ada).
-      let violRows: PointHistoryItem[] = [];
+      // Tabel violations: user_nim, session_name, points (disimpan positif), keterangan, created_at, updated_at
       const { data: viol, error: violError } = await supabase
         .from("violations")
-        .select("*")
+        .select("id, session_name, points, keterangan, created_at, updated_at")
         .eq("user_nim", currentNim);
 
       if (violError) {
-        console.warn("Gagal memuat pelanggaran (cek nama tabel/kolom):", violError.message);
-      } else {
-        violRows = (viol || [])
-          .map((v: any, i: number) => {
-            const nilai = Number(
-              v.deducted_points ?? v.points_deducted ?? v.pengurangan_poin ?? v.points ?? v.poin ?? 0
-            );
-            return {
-              key: `viol-${v.id ?? i}`,
-              jenis: "PELANGGARAN",
-              kategori: "pelanggaran" as HistoryKategori,
-              nama: String(v.keterangan ?? v.description ?? v.reason ?? v.jenis_pelanggaran ?? v.title ?? "Pelanggaran"),
-              poin: -Math.abs(nilai), // selalu negatif
-              waktu: (v.created_at ?? v.recorded_at ?? null) as string | null,
-            };
-          })
-          .filter((r) => r.poin !== 0);
+        hasQueryError = true;
+        console.error("Gagal memuat pelanggaran:", violError.message);
       }
+
+      const violRows: PointHistoryItem[] = (viol || [])
+        .map((v: any) => ({
+          key: `viol-${v.id}`,
+          jenis: "PELANGGARAN",
+          kategori: "pelanggaran" as HistoryKategori,
+          nama: `Sesi: ${v.session_name}`,
+          poin: -Math.abs(Number(v.points) || 0), // selalu negatif
+          waktu: (v.updated_at ?? v.created_at ?? null) as string | null,
+          detail: String(v.keterangan || ""),
+        }))
+        .filter((r) => r.poin !== 0);
 
       // ===== Gabungkan & urutkan: terbaru di atas, tanpa tanggal di akhir =====
       const rows = [...taskRows, ...attRows, ...violRows].sort((a, b) => {
@@ -954,7 +950,7 @@ export default function PenugasanPage() {
   };
 
   // 🟢 KARTU RIWAYAT POIN (gaya sama dengan kartu pengumuman/tugas)
-  // Penambahan = hijau, pengurangan (pelanggaran) = merah
+  // Penambahan = hijau, pengurangan (pelanggaran) = merah + keterangan pelanggaran
   const renderHistoryCard = (h: PointHistoryItem) => {
     const isPelanggaran = h.kategori === "pelanggaran";
     const isPresensi = h.kategori === "presensi";
@@ -1014,6 +1010,13 @@ export default function PenugasanPage() {
             <h3 style={{ margin: 0, fontSize: "16px", color: "#FAFAFA", fontWeight: 700, wordBreak: "break-word" }}>
               {h.nama}
             </h3>
+
+            {h.detail && (
+              <p style={{ margin: "6px 0 0 0", fontSize: "13px", lineHeight: 1.5, color: "rgba(250, 250, 250, 0.85)", wordBreak: "break-word", whiteSpace: "pre-line" }}>
+                <span style={{ color: "#FF3333", fontWeight: 700 }}>Keterangan:</span> {h.detail}
+              </p>
+            )}
+
             <span
               className="task-meta-subtitle"
               style={{ color: "rgba(250, 250, 250, 0.6)", fontSize: "12px", marginTop: "4px", display: "block" }}
@@ -1062,6 +1065,7 @@ export default function PenugasanPage() {
           alignItems: "flex-start"
         }}
       >
+        {/* SIDEBAR (memanjang sampai bawah, box Akumulasi Poin di paling bawah) */}
         <aside 
           className="task-sidebar" 
           style={{ 
@@ -1072,9 +1076,9 @@ export default function PenugasanPage() {
             position: "sticky", 
             top: "120px", 
             height: "calc(100vh - 140px)", 
-            maxHeight: "820px",
             boxSizing: "border-box",
-            padding: "24px" 
+            padding: "24px",
+            overflowY: "auto"
           }}
         >
           <div style={{ flexShrink: 0 }}>

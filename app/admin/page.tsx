@@ -16,12 +16,25 @@ import {
   AlertCircle,
   UserCheck,
   GraduationCap,
-  Search
+  Search,
+  ShieldAlert
 } from "lucide-react";
+
+type ViolationRecord = { id: string; points: number; keterangan: string };
+type ViolationDraft = { points?: string; keterangan?: string };
+
+const SESSION_OPTIONS = [
+  { value: "pra-inisialisasi", label: "Pra-Inisialisasi" },
+  { value: "inisialisasi-day1", label: "Inisialisasi Day 1" },
+  { value: "inisialisasi-day2", label: "Inisialisasi Day 2" },
+  { value: "inisialisasi-day3", label: "Inisialisasi Day 3" },
+  { value: "inisialisasi-day4", label: "Inisialisasi Day 4" },
+  { value: "pengukuhan", label: "Pengukuhan" },
+];
 
 export default function AdminPage() {
   const router = useRouter();
-  const [activeTab, setActiveTab] = useState<"rekap" | "presensi" | "evaluasi" | "tugas" | "pengumuman" | "manage">("rekap");
+  const [activeTab, setActiveTab] = useState<"rekap" | "presensi" | "pelanggaran" | "evaluasi" | "tugas" | "pengumuman" | "manage">("rekap");
 
   const [submissions, setSubmissions] = useState<any[]>([]);
   const [tasksMap, setTasksMap] = useState<{ [key: string]: any }>({});
@@ -43,6 +56,15 @@ export default function AdminPage() {
   const [filterAttendanceKelompok, setFilterAttendanceKelompok] = useState<string>("all");
   const [attendanceFilterMode, setAttendanceFilterMode] = useState<"all" | "under80" | "above80">("all");
   const [attendanceSearchQuery, setAttendanceSearchQuery] = useState("");
+
+  // State Input Pelanggaran
+  const [violationSession, setViolationSession] = useState<string>("pra-inisialisasi");
+  const [violationsMap, setViolationsMap] = useState<{ [nim: string]: ViolationRecord }>({});
+  const [violationDrafts, setViolationDrafts] = useState<{ [nim: string]: ViolationDraft }>({});
+  const [savingViolationNim, setSavingViolationNim] = useState<string | null>(null);
+  const [violationSearchQuery, setViolationSearchQuery] = useState("");
+  const [filterViolationKelompok, setFilterViolationKelompok] = useState<string>("all");
+  const [filterViolationStatus, setFilterViolationStatus] = useState<"all" | "tertib" | "melanggar">("all");
 
   // State Filter Evaluasi Akhir
   const [filterEvalPoints, setFilterEvalPoints] = useState<"all" | "complete" | "incomplete">("all");
@@ -252,6 +274,129 @@ export default function AdminPage() {
     loadAttendance();
   }, [selectedSession, currentNim]);
 
+  // ===== PELANGGARAN =====
+  const loadViolations = async () => {
+    if (!currentNim) return;
+
+    const { data, error } = await supabase
+      .from("violations")
+      .select("id, user_nim, points, keterangan")
+      .eq("session_name", violationSession);
+
+    if (error) {
+      triggerToast("GAGAL MEMUAT PELANGGARAN", error.message, true);
+      setViolationsMap({});
+      return;
+    }
+
+    const map: { [nim: string]: ViolationRecord } = {};
+    (data || []).forEach((v) => {
+      map[v.user_nim] = { id: v.id, points: Number(v.points) || 0, keterangan: v.keterangan || "" };
+    });
+    setViolationsMap(map);
+    setViolationDrafts({});
+  };
+
+  useEffect(() => {
+    if (!currentNim) return;
+    loadViolations();
+  }, [violationSession, currentNim]);
+
+  const updateViolationDraft = (nim: string, patch: ViolationDraft) => {
+    setViolationDrafts((prev) => ({ ...prev, [nim]: { ...prev[nim], ...patch } }));
+  };
+
+  // Simpan otomatis saat fokus meninggalkan baris (atau tekan Enter di kolom keterangan)
+  const handleSaveViolation = async (nim: string) => {
+    const draft = violationDrafts[nim];
+    if (!draft) return;
+
+    const saved = violationsMap[nim];
+    const pointsNum = Math.abs(Math.round(Number(draft.points ?? saved?.points ?? 0))) || 0;
+    const keterangan = (draft.keterangan ?? saved?.keterangan ?? "").trim();
+
+    const savedPoints = saved?.points ?? 0;
+    const savedKet = saved?.keterangan ?? "";
+
+    // Tidak ada perubahan
+    if (pointsNum === savedPoints && keterangan === savedKet) {
+      setViolationDrafts((prev) => {
+        const next = { ...prev };
+        delete next[nim];
+        return next;
+      });
+      return;
+    }
+
+    setSavingViolationNim(nim);
+    try {
+      if (pointsNum === 0) {
+        // Poin dikosongkan -> hapus catatan pelanggaran (jika ada)
+        if (saved) {
+          const { error } = await supabase.from("violations").delete().eq("id", saved.id);
+          if (error) throw error;
+
+          await recalculateUserTotalPoints(nim);
+          setViolationsMap((prev) => {
+            const next = { ...prev };
+            delete next[nim];
+            return next;
+          });
+          triggerToast("PELANGGARAN DIHAPUS", `Catatan pelanggaran ${nim} pada sesi ${violationSession} dihapus.`, false);
+          await loadAllData();
+        }
+        setViolationDrafts((prev) => {
+          const next = { ...prev };
+          delete next[nim];
+          return next;
+        });
+        return;
+      }
+
+      if (!keterangan) {
+        triggerToast("KETERANGAN WAJIB DIISI", `Isi keterangan pelanggaran untuk ${nim} agar tersimpan.`, true);
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from("violations")
+        .upsert(
+          {
+            user_nim: nim,
+            session_name: violationSession,
+            points: pointsNum,
+            keterangan,
+            created_by: currentNim,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: "user_nim,session_name" }
+        )
+        .select("id")
+        .single();
+
+      if (error) throw error;
+
+      await recalculateUserTotalPoints(nim);
+
+      setViolationsMap((prev) => ({
+        ...prev,
+        [nim]: { id: data?.id ?? prev[nim]?.id ?? "", points: pointsNum, keterangan },
+      }));
+      setViolationDrafts((prev) => {
+        const next = { ...prev };
+        delete next[nim];
+        return next;
+      });
+
+      triggerToast("PELANGGARAN DISIMPAN", `${nim} dikenai -${pointsNum} poin (${violationSession}).`, false);
+      await loadAllData();
+    } catch (err: any) {
+      triggerToast("GAGAL SIMPAN PELANGGARAN", err.message || "Terjadi kesalahan saat menyimpan pelanggaran.", true);
+    } finally {
+      setSavingViolationNim(null);
+    }
+  };
+
   const getGroupAttendancePercentage = (kelompokName: string) => {
     const members = students.filter((s) => s.kelompok === kelompokName);
     if (members.length === 0) return 100;
@@ -293,6 +438,13 @@ export default function AdminPage() {
 
     if (penaltyError) throw penaltyError;
 
+    const { data: violationData, error: violationError } = await supabase
+      .from("violations")
+      .select("points")
+      .eq("user_nim", nim);
+
+    if (violationError) throw violationError;
+
     const totalTaskP = (taskAwards || []).reduce(
       (acc, curr) => acc + Number(curr.awarded_points || 0),
       0
@@ -308,7 +460,12 @@ export default function AdminPage() {
       0
     );
 
-    const grandTotal = totalTaskP + totalAttP - totalPenalty;
+    const totalViolation = (violationData || []).reduce(
+      (acc, curr) => acc + Math.abs(Number(curr.points || 0)),
+      0
+    );
+
+    const grandTotal = totalTaskP + totalAttP - totalPenalty - totalViolation;
 
     const { error: updateError } = await supabase
       .from("users")
@@ -928,6 +1085,31 @@ export default function AdminPage() {
     return matchStatus && matchKelompok && matchAttendanceMode && matchSearch;
   });
 
+  // Filter tab Input Pelanggaran
+  const countViolators = students.filter((s) => !!violationsMap[s.nim]).length;
+  const countTertib = students.length - countViolators;
+
+  const filteredViolationStudents = students.filter((stu) => {
+    const hasViolation = !!violationsMap[stu.nim];
+
+    let matchStatus = true;
+    if (filterViolationStatus === "tertib") matchStatus = !hasViolation;
+    if (filterViolationStatus === "melanggar") matchStatus = hasViolation;
+
+    let matchKelompok = true;
+    if (filterViolationKelompok !== "all") {
+      matchKelompok = stu.kelompok === filterViolationKelompok;
+    }
+
+    let matchSearch = true;
+    if (violationSearchQuery.trim() !== "") {
+      const q = violationSearchQuery.toLowerCase();
+      matchSearch = (stu.nama || "").toLowerCase().includes(q) || (stu.nim || "").toLowerCase().includes(q);
+    }
+
+    return matchStatus && matchKelompok && matchSearch;
+  });
+
   const scopedEvaluationStudents = students.filter((stu) => {
     if (filterEvalKelompok !== "all") {
       return stu.kelompok === filterEvalKelompok;
@@ -974,7 +1156,7 @@ export default function AdminPage() {
           alignItems: "flex-start"
         }}
       >
-        {/* SIDEBAR ADMIN */}
+        {/* SIDEBAR ADMIN (memanjang sampai bawah) */}
         <aside 
           className="task-sidebar" 
           style={{ 
@@ -985,9 +1167,9 @@ export default function AdminPage() {
             position: "sticky", 
             top: "120px", 
             height: "calc(100vh - 140px)", 
-            maxHeight: "820px",
             boxSizing: "border-box",
-            padding: "24px" 
+            padding: "24px",
+            overflowY: "auto"
           }}
         >
           <div style={{ flexShrink: 0 }}>
@@ -1014,12 +1196,16 @@ export default function AdminPage() {
             <div className="sidebar-menu">
               <button type="button" className={`sidebar-btn ${activeTab === "rekap" ? "active" : ""}`} onClick={() => setActiveTab("rekap")}>REKAP PENGUMPULAN</button>
               <button type="button" className={`sidebar-btn ${activeTab === "presensi" ? "active" : ""}`} onClick={() => setActiveTab("presensi")}>INPUT PRESENSI</button>
+              <button type="button" className={`sidebar-btn ${activeTab === "pelanggaran" ? "active" : ""}`} onClick={() => setActiveTab("pelanggaran")}>INPUT PELANGGARAN</button>
               <button type="button" className={`sidebar-btn ${activeTab === "evaluasi" ? "active" : ""}`} onClick={() => setActiveTab("evaluasi")}>EVALUASI AKHIR</button>
               <button type="button" className={`sidebar-btn ${activeTab === "tugas" ? "active" : ""}`} onClick={() => setActiveTab("tugas")}>TAMBAH TUGAS</button>
               <button type="button" className={`sidebar-btn ${activeTab === "pengumuman" ? "active" : ""}`} onClick={() => setActiveTab("pengumuman")}>BUAT PENGUMUMAN</button>
               <button type="button" className={`sidebar-btn ${activeTab === "manage" ? "active" : ""}`} onClick={() => setActiveTab("manage")} style={{ color: "#FF3333" }}>KELOLA ARSIP DATA</button>
-              <a href="/penugasan" className="sidebar-btn" style={{ marginTop: "15px", background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.15)", color: "#FAFAFA", textAlign: "center", textDecoration: "none", display: "block" }}>TAMPILAN MAHASISWA</a>
             </div>
+          </div>
+
+          <div style={{ marginTop: "auto", flexShrink: 0, paddingTop: "20px" }}>
+            <a href="/penugasan" className="sidebar-btn" style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.15)", color: "#FAFAFA", textAlign: "center", textDecoration: "none", display: "block" }}>TAMPILAN MAHASISWA</a>
           </div>
         </aside>
 
@@ -1239,12 +1425,9 @@ export default function AdminPage() {
                       onChange={(e) => setSelectedSession(e.target.value)} 
                       style={{ background: "#0a0a0a", border: "1px solid #333", color: "#FAFAFA", padding: "10px", borderRadius: "50px", fontSize: "13px", fontWeight: 600, outline: "none", width: "100%" }}
                     >
-                      <option value="pra-inisialisasi">Pra-Inisialisasi</option>
-                      <option value="inisialisasi-day1">Inisialisasi Day 1</option>
-                      <option value="inisialisasi-day2">Inisialisasi Day 2</option>
-                      <option value="inisialisasi-day3">Inisialisasi Day 3</option>
-                      <option value="inisialisasi-day4">Inisialisasi Day 4</option>
-                      <option value="pengukuhan">Pengukuhan</option>
+                      {SESSION_OPTIONS.map((s) => (
+                        <option key={s.value} value={s.value}>{s.label}</option>
+                      ))}
                     </select>
                   </div>
 
@@ -1423,6 +1606,184 @@ export default function AdminPage() {
                                 <option value={150} style={{ color: "#00FF88" }}>Izin dengan keterangan (+150 poin)</option>
                                 <option value={0} style={{ color: "#FF3333" }}>Tidak hadir tanpa izin (0 poin)</option>
                               </select>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {activeTab === "pelanggaran" && (
+            <div className="clickable-task-card" style={{ cursor: "default", padding: "20px", width: "100%", boxSizing: "border-box" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "12px", marginBottom: "15px" }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                    <ShieldAlert color="#00FF88" size={20} style={{ flexShrink: 0 }} />
+                    <h3 style={{ color: "#FAFAFA", fontSize: "15px", margin: 0, fontWeight: 700 }}>
+                      INPUT PELANGGARAN
+                    </h3>
+                  </div>
+
+                  <div style={{ display: "flex", gap: "6px" }}>
+                    <span style={{ fontSize: "10px", fontWeight: "700", padding: "3px 8px", borderRadius: "50px", background: "transparent", border: "1px solid #00FF88", color: "#00FF88", whiteSpace: "nowrap" }}>
+                      Tertib: ({countTertib})
+                    </span>
+                    <span style={{ fontSize: "10px", fontWeight: "700", padding: "3px 8px", borderRadius: "50px", background: "transparent", border: "1px solid #FF3333", color: "#FF3333", whiteSpace: "nowrap" }}>
+                      Tidak Tertib: ({countViolators})
+                    </span>
+                  </div>
+                </div>
+
+                {/* Cari Nama / NIM */}
+                <div style={{ display: "flex", width: "100%", gap: "10px", alignItems: "flex-end" }}>
+                  <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "4px" }}>
+                    <label style={{ fontSize: "11px", color: "#aaa", fontWeight: 600 }}>Cari Nama / NIM Mahasiswa:</label>
+                    <div style={{ position: "relative", display: "flex", alignItems: "center" }}>
+                      <Search size={15} color="#888" style={{ position: "absolute", left: "14px" }} />
+                      <input
+                        type="text"
+                        placeholder="Ketik nama lengkap atau NIM mahasiswa..."
+                        value={violationSearchQuery}
+                        onChange={(e) => setViolationSearchQuery(e.target.value)}
+                        style={{ background: "#0a0a0a", border: "1px solid #333", color: "#fff", padding: "10px 14px 10px 38px", borderRadius: "50px", fontSize: "13px", fontWeight: 600, width: "100%", outline: "none" }}
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Sesi, Kelompok, Status */}
+                <div style={{ display: "flex", alignItems: "flex-end", gap: "10px", width: "100%", flexWrap: "wrap", marginTop: "4px" }}>
+                  <div style={{ flex: 1.5, minWidth: "160px", display: "flex", flexDirection: "column", gap: "4px" }}>
+                    <label style={{ fontSize: "11px", color: "#aaa", fontWeight: 600 }}>Pilih Sesi Pelanggaran:</label>
+                    <select
+                      value={violationSession}
+                      onChange={(e) => setViolationSession(e.target.value)}
+                      style={{ background: "#0a0a0a", border: "1px solid #333", color: "#FAFAFA", padding: "10px", borderRadius: "50px", fontSize: "13px", fontWeight: 600, outline: "none", width: "100%" }}
+                    >
+                      {SESSION_OPTIONS.map((s) => (
+                        <option key={s.value} value={s.value}>{s.label}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div style={{ flex: 1.2, minWidth: "140px", display: "flex", flexDirection: "column", gap: "4px" }}>
+                    <label style={{ fontSize: "11px", color: "#aaa", fontWeight: 600 }}>Filter Kelompok:</label>
+                    <select
+                      value={filterViolationKelompok}
+                      onChange={(e) => setFilterViolationKelompok(e.target.value)}
+                      style={{ background: "#0a0a0a", border: "1px solid #333", color: "#FAFAFA", padding: "10px", borderRadius: "50px", fontSize: "13px", fontWeight: 600, outline: "none", width: "100%" }}
+                    >
+                      <option value="all">Semua Kelompok</option>
+                      {listKelompok.map((kel) => (
+                        <option key={kel} value={kel}>{kel}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div style={{ flex: 1.2, minWidth: "140px", display: "flex", flexDirection: "column", gap: "4px" }}>
+                    <label style={{ fontSize: "11px", color: "#aaa", fontWeight: 600 }}>Filter Status:</label>
+                    <select
+                      value={filterViolationStatus}
+                      onChange={(e: any) => setFilterViolationStatus(e.target.value)}
+                      style={{ background: "#0a0a0a", border: "1px solid #333", color: "#FAFAFA", padding: "10px", borderRadius: "50px", fontSize: "13px", fontWeight: 600, outline: "none", width: "100%" }}
+                    >
+                      <option value="all">Semua ({students.length})</option>
+                      <option value="tertib">Tertib ({countTertib})</option>
+                      <option value="melanggar">Tidak Tertib ({countViolators})</option>
+                    </select>
+                  </div>
+                </div>
+
+                <p style={{ margin: "4px 0 0 0", fontSize: "11.5px", color: "rgba(250,250,250,0.5)" }}>
+                  Isi poin &amp; keterangan lalu pindah ke baris lain (atau tekan Enter di kolom keterangan) untuk menyimpan. Kosongkan poin (0) untuk menghapus catatan pelanggaran.
+                </p>
+              </div>
+
+              <div className="detail-divider" style={{ marginBottom: "15px" }} />
+
+              <div style={{ width: "100%", overflowX: "auto" }}>
+                <table style={{ width: "100%", color: "#FAFAFA", borderCollapse: "collapse", fontSize: "13px" }}>
+                  <thead>
+                    <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.1)", color: "#fafafa", textAlign: "left" }}>
+                      <th style={{ padding: "10px", textAlign: "center" }}>NIM</th>
+                      <th style={{ padding: "10px", textAlign: "center" }}>NAMA MAHASISWA</th>
+                      <th style={{ padding: "10px", textAlign: "center" }}>KELOMPOK</th>
+                      <th style={{ padding: "10px", textAlign: "center" }}>POIN PELANGGARAN</th>
+                      <th style={{ padding: "10px", textAlign: "center" }}>KETERANGAN</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredViolationStudents.length === 0 ? (
+                      <tr><td colSpan={5} style={{ padding: "20px", textAlign: "center", color: "#666" }}>Tidak ada data mahasiswa yang sesuai filter.</td></tr>
+                    ) : (
+                      filteredViolationStudents.map((stu) => {
+                        const saved = violationsMap[stu.nim];
+                        const draft = violationDrafts[stu.nim];
+                        const pointsValue = draft?.points ?? String(saved?.points ?? 0);
+                        const keteranganValue = draft?.keterangan ?? (saved?.keterangan ?? "");
+                        const hasViolation = !!saved || (Number(pointsValue) || 0) > 0;
+                        const isSaving = savingViolationNim === stu.nim;
+
+                        return (
+                          <tr
+                            key={stu.nim}
+                            style={{ borderBottom: "1px solid rgba(255,255,255,0.05)", opacity: isSaving ? 0.6 : 1 }}
+                            onBlur={(e) => {
+                              if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+                              handleSaveViolation(stu.nim);
+                            }}
+                          >
+                            <td style={{ padding: "12px 10px", fontFamily: "monospace", fontWeight: "bold", color: "#00FF88", whiteSpace: "nowrap" }}>{stu.nim}</td>
+                            <td style={{ padding: "12px 10px", color: "#FAFAFA", fontWeight: 600 }}>{stu.nama}</td>
+                            <td style={{ padding: "12px 10px", color: "#FAFAFA", fontWeight: 600 }}>{stu.kelompok || "-"}</td>
+                            <td style={{ padding: "12px 10px" }}>
+                              <input
+                                type="number"
+                                min={0}
+                                value={pointsValue}
+                                disabled={isSaving}
+                                onFocus={(e) => e.target.select()}
+                                onChange={(e) => updateViolationDraft(stu.nim, { points: e.target.value })}
+                                style={{
+                                  background: "#0a0a0a",
+                                  border: `1px solid ${hasViolation ? "#FF3333" : "#333"}`,
+                                  color: hasViolation ? "#FF3333" : "#FAFAFA",
+                                  padding: "8px 12px",
+                                  borderRadius: "50px",
+                                  fontSize: "12px",
+                                  fontWeight: 700,
+                                  outline: "none",
+                                  width: "130px"
+                                }}
+                              />
+                            </td>
+                            <td style={{ padding: "12px 10px", minWidth: "280px" }}>
+                              <input
+                                type="text"
+                                placeholder="Ketik keterangan pelanggaran di sini..."
+                                value={keteranganValue}
+                                disabled={isSaving}
+                                onChange={(e) => updateViolationDraft(stu.nim, { keterangan: e.target.value })}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                                }}
+                                style={{
+                                  background: "#0a0a0a",
+                                  border: `1px solid ${hasViolation ? "#FF3333" : "#333"}`,
+                                  color: "#FAFAFA",
+                                  padding: "8px 14px",
+                                  borderRadius: "50px",
+                                  fontSize: "12px",
+                                  fontWeight: 600,
+                                  outline: "none",
+                                  width: "100%",
+                                  boxSizing: "border-box"
+                                }}
+                              />
                             </td>
                           </tr>
                         );
@@ -1728,7 +2089,7 @@ export default function AdminPage() {
                             <td style={{ padding: "10px", whiteSpace: "nowrap" }}>
                               {a.is_active !== false ? (
                                 <span style={{ background: "transparent", border: "1px solid #00FF88", color: "#00FF88", padding: "4px 10px", borderRadius: "50px", fontSize: "10px", fontWeight: 800, whiteSpace: "nowrap", display: "inline-block" }}>
-                                  DIAKTFKAN
+                                  DIAKTIFKAN
                                 </span>
                               ) : (
                                 <span style={{ background: "transparent", border: "1px solid #FF3333", color: "#FF3333", padding: "4px 10px", borderRadius: "50px", fontSize: "10px", fontWeight: 800, whiteSpace: "nowrap", display: "inline-block" }}>
