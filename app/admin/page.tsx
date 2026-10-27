@@ -1297,7 +1297,7 @@ export default function AdminPage() {
                       <th style={{ padding: "12px 10px" }}>JUDUL TUGAS</th>
                       <th style={{ padding: "12px 10px" }}>WAKTU PENGUMPULAN</th>
                       <th style={{ padding: "12px 10px" }}>BERKAS</th>
-                      <th style={{ padding: "12px 10px", textAlign: "right" }}>VALIDASI</th>
+                      <th style={{ padding: "12px 10px" }}>VALIDASI</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1879,9 +1879,9 @@ export default function AdminPage() {
                 <table style={{ width: "100%", color: "#FAFAFA", borderCollapse: "collapse", fontSize: "13px" }}>
                   <thead>
                     <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.1)", color: "#fafafa", textAlign: "left" }}>
-                      <th style={{ padding: "10px" }}>NIM</th>
-                      <th style={{ padding: "10px" }}>NAMA MAHASISWA</th>
-                      <th style={{ padding: "10px" }}>KELOMPOK</th>
+                      <th style={{ padding: "10px", textAlign: "center" }}>NIM</th>
+                      <th style={{ padding: "10px", textAlign: "center" }}>NAMA MAHASISWA</th>
+                      <th style={{ padding: "10px", textAlign: "center" }}>KELOMPOK</th>
                       <th style={{ padding: "10px", textAlign: "center" }}>TOTAL POIN</th>
                       <th style={{ padding: "10px", textAlign: "center" }}>STATUS KELULUSAN</th>
                     </tr>
@@ -1989,13 +1989,13 @@ export default function AdminPage() {
                   <table style={{ width: "100%", color: "#FAFAFA", borderCollapse: "collapse", fontSize: "13px" }}>
                     <thead>
                       <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.1)", color: "#fafafa", textAlign: "left" }}>
-                        <th style={{ padding: "10px" }}>ID</th>
-                        <th style={{ padding: "10px" }}>KATEGORI</th>
-                        <th style={{ padding: "10px" }}>JUDUL</th>
-                        <th style={{ padding: "10px" }}>POIN</th>
-                        <th style={{ padding: "10px" }}>DEADLINE</th>
-                        <th style={{ padding: "10px" }}>VISIBILITAS</th>
-                        <th style={{ padding: "10px" }}>AKSI</th>
+                        <th style={{ padding: "10px", textAlign: "center" }}>ID</th>
+                        <th style={{ padding: "10px", textAlign: "center" }}>KATEGORI</th>
+                        <th style={{ padding: "10px", textAlign: "center" }}>JUDUL</th>
+                        <th style={{ padding: "10px", textAlign: "center" }}>POIN</th>
+                        <th style={{ padding: "10px", textAlign: "center" }}>DEADLINE</th>
+                        <th style={{ padding: "10px", textAlign: "center" }}>VISIBILITAS</th>
+                        <th style={{ padding: "10px", textAlign: "center" }}>AKSI</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -2071,10 +2071,10 @@ export default function AdminPage() {
                   <table style={{ width: "100%", color: "#FAFAFA", borderCollapse: "collapse", fontSize: "13px" }}>
                     <thead>
                       <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.1)", color: "#fafafa", textAlign: "left" }}>
-                        <th style={{ padding: "10px" }}>JUDUL</th>
-                        <th style={{ padding: "10px" }}>TANGGAL</th>
-                        <th style={{ padding: "10px" }}>VISIBILITAS</th>
-                        <th style={{ padding: "10px" }}>AKSI</th>
+                        <th style={{ padding: "10px", textAlign: "center" }}>JUDUL</th>
+                        <th style={{ padding: "10px", textAlign: "center" }}>TANGGAL</th>
+                        <th style={{ padding: "10px", textAlign: "center" }}>VISIBILITAS</th>
+                        <th style={{ padding: "10px", textAlign: "center" }}>AKSI</th>
                       </tr>
                     </thead>
                     <tbody>
